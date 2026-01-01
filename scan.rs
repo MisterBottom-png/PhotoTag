@@ -11,7 +11,7 @@ use tauri::Manager;
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_128;
 
-const SUPPORTED_EXT: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "cr2", "nef", "arw", "dng"];
+const SUPPORTED_EXT: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "cr2", "nef", "arw", "dng", "raf"];
 
 pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: AppPaths, tagging: TaggingConfig) -> Result<()> {
     let root_str = root.to_string_lossy().to_string();

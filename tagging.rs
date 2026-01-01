@@ -26,6 +26,7 @@ pub struct TaggingEngine {
     scene_session: Option<Session<'static>>,
     detection_session: Option<Session<'static>>,
     config: TaggingConfig,
+    onnx_enabled: bool,
 }
 
 impl TaggingEngine {
@@ -37,6 +38,7 @@ impl TaggingEngine {
                 scene_session: None,
                 detection_session: None,
                 config,
+                onnx_enabled: false,
             });
         }
 
@@ -67,11 +69,22 @@ impl TaggingEngine {
                 .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
                 .and_then(|b| b.with_model_from_file(detection_model_path).ok())
         });
+        if scene_session.is_some() {
+            log::info!("Loaded scene model: {}", scene_path.display());
+        } else {
+            log::warn!("Failed to load scene model: {}", scene_path.display());
+        }
+        if detection_session.is_some() {
+            log::info!("Loaded detection model: {}", detect_path.display());
+        } else {
+            log::warn!("Failed to load detection model: {}", detect_path.display());
+        }
 
         Ok(Self {
             scene_session,
             detection_session,
             config,
+            onnx_enabled: true,
         })
     }
 
@@ -92,7 +105,7 @@ impl TaggingEngine {
         if portrait_score > 0.0 {
             tags.insert("portrait".into(), portrait_score);
         }
-        if tags.is_empty() {
+        if tags.is_empty() && !self.onnx_enabled {
             tags.extend(self.heuristic_tags(preview_path, exif));
         }
 
