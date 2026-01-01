@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ExifToolEntry {
     #[serde(rename = "Make")]
     make: Option<String>,

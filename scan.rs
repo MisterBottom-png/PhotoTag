@@ -7,7 +7,7 @@ use crate::tagging::TaggingEngine;
 use crate::thumbnails;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::Emitter;
+use tauri::Manager;
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -30,10 +30,10 @@ pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: Ap
 
     let total = discovered.len();
     let emitter = app.clone();
-    let tagging_engine = TaggingEngine::new(tagging)?;
+    let mut tagging_engine = TaggingEngine::new(tagging)?;
     for (idx, path) in discovered.iter().enumerate() {
         emit_progress(&emitter, total, idx, path);
-        process_file(path, &pool, &paths, &tagging_engine)?;
+        process_file(path, &pool, &paths, &mut tagging_engine)?;
     }
     emit_progress(&emitter, total, total, &root);
     Ok(())
@@ -56,7 +56,7 @@ fn compute_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest))
 }
 
-fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &TaggingEngine) -> Result<()> {
+fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &mut TaggingEngine) -> Result<()> {
     let metadata = fs::metadata(path)?;
     let mtime = metadata
         .modified()

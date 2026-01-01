@@ -1,5 +1,5 @@
 use crate::error::Result;
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::imageops::FilterType;
 use std::path::{Path, PathBuf};
 
 fn resize_image(input: &Path, output: &Path, max_dim: u32) -> Result<()> {

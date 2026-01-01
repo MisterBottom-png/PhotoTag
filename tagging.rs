@@ -2,54 +2,55 @@ use crate::config::TaggingConfig;
 use crate::error::{Error, Result};
 use crate::models::{ExifMetadata, TaggingResult};
 use image::imageops::FilterType;
-use onnxruntime::{environment::Environment, session::Session, tensor::OrtOwnedTensor, GraphOptimizationLevel};
+use lazy_static::lazy_static;
+use onnxruntime::{
+    environment::Environment,
+    ndarray::Array,
+    session::Session,
+    tensor::OrtOwnedTensor,
+    GraphOptimizationLevel, LoggingLevel,
+};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+
+lazy_static! {
+    static ref ORT_ENV: Option<Environment> = Environment::builder()
+        .with_name("photo-tagging")
+        .with_log_level(LoggingLevel::Warning)
+        .build()
+        .ok();
+}
 
 pub struct TaggingEngine {
-    scene_session: Option<Session>,
-    detection_session: Option<Session>,
+    scene_session: Option<Session<'static>>,
+    detection_session: Option<Session<'static>>,
     config: TaggingConfig,
-    _env: Option<Arc<Environment>>,
 }
 
 impl TaggingEngine {
     pub fn new(config: TaggingConfig) -> Result<Self> {
-        let env = Environment::builder()
-            .with_name("photo-tagging")
-            .with_log_level(onnxruntime::LoggingLevel::Warning)
-            .build()
-            .ok()
-            .map(Arc::new);
+        let scene_session = ORT_ENV.as_ref().and_then(|env| {
+            env.new_session_builder()
+                .ok()
+                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
+                .and_then(|b| b.with_model_from_file(&config.scene_model_path).ok())
+        });
 
-        let scene_session = env
-            .as_ref()
-            .and_then(|e| {
-                Session::builder(e)
-                    .with_optimization_level(GraphOptimizationLevel::Basic)
-                    .and_then(|b| b.with_model_from_file(&config.scene_model_path))
-                    .ok()
-            });
-
-        let detection_session = env
-            .as_ref()
-            .and_then(|e| {
-                Session::builder(e)
-                    .with_optimization_level(GraphOptimizationLevel::Basic)
-                    .and_then(|b| b.with_model_from_file(&config.detection_model_path))
-                    .ok()
-            });
+        let detection_session = ORT_ENV.as_ref().and_then(|env| {
+            env.new_session_builder()
+                .ok()
+                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
+                .and_then(|b| b.with_model_from_file(&config.detection_model_path).ok())
+        });
 
         Ok(Self {
             scene_session,
             detection_session,
             config,
-            _env: env,
         })
     }
 
-    pub fn classify(&self, preview_path: &Path, exif: &ExifMetadata) -> Result<TaggingResult> {
+    pub fn classify(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<TaggingResult> {
         let mut tags: HashMap<String, f32> = HashMap::new();
         let scene_probs = self.run_scene(preview_path).unwrap_or_default();
         let portrait_score = self.run_portrait(preview_path, exif).unwrap_or(0.0);
@@ -70,7 +71,7 @@ impl TaggingEngine {
         Ok(TaggingResult { tags })
     }
 
-    fn run_scene(&self, preview_path: &Path) -> Result<HashMap<String, f32>> {
+    fn run_scene(&mut self, preview_path: &Path) -> Result<HashMap<String, f32>> {
         if self.scene_session.is_none() {
             // simple heuristic fallback based on filename
             let name = preview_path
@@ -85,16 +86,17 @@ impl TaggingEngine {
             return Ok(map);
         }
 
-        let session = self.scene_session.as_ref().unwrap();
+        let session = self.scene_session.as_mut().unwrap();
         let img = image::open(preview_path)?;
         let resized = img.resize(224, 224, FilterType::Triangle).to_rgb32f();
         let mut input: Vec<f32> = Vec::with_capacity(224 * 224 * 3);
         for pixel in resized.pixels() {
             input.extend_from_slice(&[pixel[0], pixel[1], pixel[2]]);
         }
-        let input_shape = [1i64, 224, 224, 3];
+        let input_tensor = Array::from_shape_vec((1, 224, 224, 3), input)
+            .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .run(vec![(&input_shape, input.as_slice())])
+            .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
 
         let logits = outputs[0].as_slice().unwrap_or(&[]);
@@ -108,20 +110,21 @@ impl TaggingEngine {
         Ok(map)
     }
 
-    fn run_portrait(&self, preview_path: &Path, exif: &ExifMetadata) -> Result<f32> {
+    fn run_portrait(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<f32> {
         if self.detection_session.is_none() {
             return Ok(0.0);
         }
-        let session = self.detection_session.as_ref().unwrap();
+        let session = self.detection_session.as_mut().unwrap();
         let img = image::open(preview_path)?;
         let resized = img.resize(320, 320, FilterType::Triangle).to_rgb8();
         let mut input: Vec<f32> = Vec::with_capacity((320 * 320 * 3) as usize);
         for p in resized.pixels() {
             input.extend_from_slice(&[p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]);
         }
-        let input_shape = [1i64, 320, 320, 3];
+        let input_tensor = Array::from_shape_vec((1, 320, 320, 3), input)
+            .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .run(vec![(&input_shape, input.as_slice())])
+            .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run detector: {e}")))?;
         let scores = outputs[0].as_slice().unwrap_or(&[]);
         let max_score = scores.iter().cloned().fold(0.0, f32::max);
@@ -146,7 +149,7 @@ mod tests {
 
     #[test]
     fn fallback_scene_uses_filename() {
-        let engine = TaggingEngine::new(TaggingConfig::default()).unwrap();
+        let mut engine = TaggingEngine::new(TaggingConfig::default()).unwrap();
         let dummy = PathBuf::from("street_sample.jpg");
         let res = engine.run_scene(&dummy).unwrap();
         assert!(res.get("street").copied().unwrap_or(0.0) > 0.0);
@@ -154,7 +157,7 @@ mod tests {
 
     #[test]
     fn portrait_requires_detector() {
-        let engine = TaggingEngine::new(TaggingConfig::default()).unwrap();
+        let mut engine = TaggingEngine::new(TaggingConfig::default()).unwrap();
         let score = engine
             .run_portrait(Path::new("portrait.jpg"), &ExifMetadata::default())
             .unwrap();

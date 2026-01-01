@@ -16,6 +16,12 @@ pub enum Error {
     #[error("Tauri API Error: {0}")]
     Tauri(#[from] tauri::Error),
 
+    #[error("Json Error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Image Error: {0}")]
+    Image(#[from] image::ImageError),
+
     #[error("Path Error: {0}")]
     Path(String),
 
