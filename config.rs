@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::api::path::app_data_dir;
+use tauri::api::path::{app_data_dir, resource_dir};
 use tauri::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,18 +51,13 @@ impl AppPaths {
         std::fs::create_dir_all(&models_dir)?;
         std::fs::create_dir_all(&bin_dir)?;
 
-        // Copy bundled binaries/models from the working directory into the app data dir for portability during dev.
-        if let Ok(entries) = std::fs::read_dir("./bin") {
-            for entry in entries.flatten() {
-                let dest = bin_dir.join(entry.file_name());
-                let _ = std::fs::copy(entry.path(), dest);
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir("./models") {
-            for entry in entries.flatten() {
-                let dest = models_dir.join(entry.file_name());
-                let _ = std::fs::copy(entry.path(), dest);
-            }
+        // Copy bundled resources or fall back to local dev folders.
+        if let Ok(resource_root) = resource_dir(&Config::default()) {
+            let _ = copy_dir_recursive(&resource_root.join("bin"), &bin_dir);
+            let _ = copy_dir_recursive(&resource_root.join("models"), &models_dir);
+        } else {
+            let _ = copy_dir_recursive(Path::new("./bin"), &bin_dir);
+            let _ = copy_dir_recursive(Path::new("./models"), &models_dir);
         }
 
         Ok(Self {
@@ -91,6 +86,21 @@ impl AppPaths {
         std::fs::create_dir_all(dir)?;
         Ok(dir.to_path_buf())
     }
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
