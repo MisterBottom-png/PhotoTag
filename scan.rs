@@ -71,6 +71,13 @@ fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &mut Taggi
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let size = metadata.len() as i64;
+    let path_str = path.to_string_lossy().to_string();
+    let conn = pool.get()?;
+    if let Some((existing_mtime, existing_size)) = db::get_photo_status(&conn, &path_str)? {
+        if existing_mtime == mtime && existing_size == size {
+            return Ok(());
+        }
+    }
 
     let hash = compute_hash(path)?;
     let file_name = path
@@ -124,7 +131,6 @@ fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &mut Taggi
         updated_at: None,
     };
 
-    let conn = pool.get()?;
     let photo_id = db::upsert_photo(&conn, &photo)?;
     photo.id = Some(photo_id);
 

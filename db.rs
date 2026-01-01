@@ -105,6 +105,16 @@ pub fn replace_auto_tags(conn: &DbConnection, photo_id: i64, tagging: TaggingRes
     Ok(())
 }
 
+pub fn get_photo_status(conn: &DbConnection, path: &str) -> Result<Option<(i64, i64)>> {
+    conn.query_row(
+        "SELECT mtime, size FROM photos WHERE path = ?1",
+        params![path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 pub fn list_paths_with_prefix(conn: &DbConnection, root: &str) -> Result<HashSet<String>> {
     let like = format!("{}%", root.replace('%', "\\%").replace('_', "\\_"));
     let mut stmt = conn.prepare("SELECT path FROM photos WHERE path LIKE ?1 ESCAPE '\\\\'")?;
