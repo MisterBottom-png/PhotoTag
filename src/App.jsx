@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
 import { listen } from "@tauri-apps/api/event";
+import { open as openExternal } from "@tauri-apps/api/shell";
+import { dirname } from "@tauri-apps/api/path";
 
 const TAGS = ["street", "landscape", "portrait", "nature"];
 
@@ -178,7 +180,7 @@ function TagList({ tags, onRemove }) {
   );
 }
 
-function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun }) {
+function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun, onShowInFolder }) {
   const [newTag, setNewTag] = useState("");
 
   if (!selected) {
@@ -231,9 +233,14 @@ function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun }) {
           Add
         </button>
       </div>
-      <button className="secondary" onClick={onRerun}>
-        Re-run auto detection
-      </button>
+      <div className="detail-actions">
+        <button className="secondary" onClick={onRerun}>
+          Re-run auto detection
+        </button>
+        <button className="ghost" onClick={onShowInFolder}>
+          Show in folder
+        </button>
+      </div>
     </div>
   );
 }
@@ -289,6 +296,12 @@ export default function App() {
     await refresh();
   };
 
+  const handleShowInFolder = async () => {
+    if (!selected?.photo?.path) return;
+    const folder = await dirname(selected.photo.path);
+    await openExternal(folder);
+  };
+
   const importProgressText = useMemo(() => {
     if (!progress.discovered) return "Idle";
     return `Processing ${progress.processed}/${progress.discovered}`;
@@ -311,6 +324,7 @@ export default function App() {
           onAddTag={handleAddTag}
           onRemoveTag={handleRemoveTag}
           onRerun={handleRerun}
+          onShowInFolder={handleShowInFolder}
         />
       </div>
     </div>
