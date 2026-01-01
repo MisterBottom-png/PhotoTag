@@ -37,9 +37,11 @@ fn get_database_path() -> Result<PathBuf> {
 }
 
 /// Applies all pending database migrations.
-fn run_migrations(connection: &Connection) -> Result<()> {
-    connection.execute_batch("PRAGMA journal_mode=WAL;")?;
-    connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+fn run_migrations(connection: &DbConnection) -> Result<()> {
+    // `DbConnection` dereferences to the underlying rusqlite `Connection`,
+    // allowing us to call the rusqlite APIs directly.
+    let connection: &Connection = &*connection;
+
 
     log::info!("Running database migrations...");
     
