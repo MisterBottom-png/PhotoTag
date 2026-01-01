@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::api::path::{app_data_dir, resource_dir};
-use tauri::Config;
+use tauri::{Config, Env, PackageInfo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaggingConfig {
@@ -52,7 +52,14 @@ impl AppPaths {
         std::fs::create_dir_all(&bin_dir)?;
 
         // Copy bundled resources or fall back to local dev folders.
-        if let Ok(resource_root) = resource_dir(&Config::default()) {
+        let package_info = PackageInfo {
+            name: "PhotoTagger".to_string(),
+            version: env!("CARGO_PKG_VERSION").parse().unwrap(),
+            authors: env!("CARGO_PKG_AUTHORS"),
+            description: env!("CARGO_PKG_DESCRIPTION"),
+        };
+        let env = Env::default();
+        if let Some(resource_root) = resource_dir(&package_info, &env) {
             let _ = copy_dir_recursive(&resource_root.join("bin"), &bin_dir);
             let _ = copy_dir_recursive(&resource_root.join("models"), &models_dir);
         } else {
