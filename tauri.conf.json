@@ -22,7 +22,7 @@
       },
       "fs": {
         "all": true,
-        "scope": ["$APP/*"]
+        "scope": ["$APP/*", "$PICTURE/*", "$DOCUMENT/*", "$DESKTOP/*"]
       },
       "path": {
         "all": true
