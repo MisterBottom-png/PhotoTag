@@ -49,12 +49,3 @@ CREATE INDEX IF NOT EXISTS idx_tags_photo_id ON tags (photo_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);
 CREATE INDEX IF NOT EXISTS idx_tags_source ON tags (source);
 "#;
-
-pub const MIGRATION_0002: &str = r#"
--- Import roots to support incremental scanning
-CREATE TABLE IF NOT EXISTS import_roots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    root_path TEXT NOT NULL UNIQUE,
-    last_scanned_at INTEGER
-);
-"#;
