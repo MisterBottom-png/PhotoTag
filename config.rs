@@ -35,10 +35,9 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    pub fn discover() -> Result<Self, crate::error::Error> {
-        let app_root = app_data_dir(&Config::default())
-            .ok_or_else(|| crate::error::Error::Path("Failed to get app data dir".to_string()))?
-            .join("PhotoCatalogApp");
+    pub fn discover(config: &Config) -> Result<Self, crate::error::Error> {
+        let app_root = app_data_dir(config)
+            .ok_or_else(|| crate::error::Error::Path("Failed to get app data dir".to_string()))?;
 
         let db_path = app_root.join("library.db");
         let thumbs_dir = app_root.join("thumbs");
@@ -52,9 +51,19 @@ impl AppPaths {
         std::fs::create_dir_all(&bin_dir)?;
 
         // Copy bundled resources or fall back to local dev folders.
+        let package_name = config
+            .package
+            .product_name
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string());
+        let package_version = config
+            .package
+            .version
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         let package_info = PackageInfo {
-            name: "PhotoTagger".to_string(),
-            version: env!("CARGO_PKG_VERSION").parse().unwrap(),
+            name: package_name,
+            version: package_version.parse().unwrap(),
             authors: env!("CARGO_PKG_AUTHORS"),
             description: env!("CARGO_PKG_DESCRIPTION"),
         };

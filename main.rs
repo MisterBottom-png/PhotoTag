@@ -103,7 +103,8 @@ async fn import_folder(path: String, app: tauri::AppHandle, state: tauri::State<
 fn main() {
     env_logger::init();
 
-    let paths = AppPaths::discover().expect("Failed to discover app paths");
+    let context = tauri::generate_context!();
+    let paths = AppPaths::discover(context.config()).expect("Failed to discover app paths");
     let tagging = TaggingConfig::default();
     let db_pool = db::init_database(&paths).expect("Failed to initialize database");
 
@@ -123,6 +124,6 @@ fn main() {
             rerun_auto,
             export_csv
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
