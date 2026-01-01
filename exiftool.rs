@@ -59,7 +59,7 @@ fn parse_datetime(value: &Option<String>) -> Option<i64> {
 pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata> {
     let exe = paths.resolve_bin("exiftool.exe");
     let output = Command::new(exe)
-        .arg("-json")
+        .args(["-json", "-n"])
         .arg(file_path)
         .output()
         .map_err(|e| Error::Init(format!("Failed to execute ExifTool: {e}")))?;

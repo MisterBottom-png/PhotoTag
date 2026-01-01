@@ -20,6 +20,10 @@
       "dialog": {
         "all": true
       },
+      "protocol": {
+        "asset": true,
+        "assetScope": ["$APPDATA/**"]
+      },
       "fs": {
         "all": true,
         "scope": ["$APP/*", "$PICTURE/*", "$DOCUMENT/*", "$DESKTOP/*"]
