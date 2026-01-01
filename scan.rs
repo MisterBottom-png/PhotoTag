@@ -8,12 +8,21 @@ use crate::thumbnails;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
+use uuid::Uuid;
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_128;
 
-const SUPPORTED_EXT: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "cr2", "nef", "arw", "dng", "raf"];
+const SUPPORTED_EXT: &[&str] = &[
+    "jpg", "jpeg", "png", "tiff", "tif", "cr2", "nef", "arw", "dng", "raf",
+];
 
-pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: AppPaths, tagging: TaggingConfig) -> Result<()> {
+pub fn scan_folder(
+    app: tauri::AppHandle,
+    root: PathBuf,
+    pool: DbPool,
+    paths: AppPaths,
+    tagging: TaggingConfig,
+) -> Result<()> {
     let root_str = root.to_string_lossy().to_string();
     let existing_paths = {
         let conn = pool.get()?;
@@ -34,12 +43,13 @@ pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: Ap
         .map(|e| e.into_path())
         .collect();
 
+    let import_batch_id = Uuid::new_v4().to_string();
     let total = discovered.len();
     let emitter = app.clone();
     let mut tagging_engine = TaggingEngine::new(tagging)?;
     for (idx, path) in discovered.iter().enumerate() {
         emit_progress(&emitter, total, idx, path);
-        process_file(path, &pool, &paths, &mut tagging_engine)?;
+        process_file(path, &pool, &paths, &mut tagging_engine, &import_batch_id)?;
     }
     emit_progress(&emitter, total, total, &root);
     Ok(())
@@ -62,7 +72,13 @@ fn compute_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest))
 }
 
-fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &mut TaggingEngine) -> Result<()> {
+fn process_file(
+    path: &Path,
+    pool: &DbPool,
+    paths: &AppPaths,
+    engine: &mut TaggingEngine,
+    import_batch_id: &str,
+) -> Result<()> {
     let metadata = fs::metadata(path)?;
     let mtime = metadata
         .modified()
@@ -127,6 +143,11 @@ fn process_file(path: &Path, pool: &DbPool, paths: &AppPaths, engine: &mut Taggi
         gps_lng: exif.gps_lng,
         thumb_path: Some(thumb_path.to_string_lossy().to_string()),
         preview_path: Some(final_preview.to_string_lossy().to_string()),
+        rating: None,
+        picked: false,
+        rejected: false,
+        last_modified: None,
+        import_batch_id: Some(import_batch_id.to_string()),
         created_at: None,
         updated_at: None,
     };

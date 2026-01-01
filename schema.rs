@@ -58,3 +58,19 @@ CREATE TABLE IF NOT EXISTS import_roots (
     last_scanned_at INTEGER
 );
 "#;
+
+pub const MIGRATION_0003: &str = r#"
+-- Cull workflow fields
+ALTER TABLE photos ADD COLUMN rating INTEGER;
+ALTER TABLE photos ADD COLUMN picked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE photos ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE photos ADD COLUMN last_modified INTEGER NOT NULL DEFAULT (strftime('%s', 'now'));
+ALTER TABLE photos ADD COLUMN import_batch_id TEXT;
+
+-- Cull workflow indexes
+CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos (rating);
+CREATE INDEX IF NOT EXISTS idx_photos_picked ON photos (picked);
+CREATE INDEX IF NOT EXISTS idx_photos_rejected ON photos (rejected);
+CREATE INDEX IF NOT EXISTS idx_photos_import_batch_id ON photos (import_batch_id);
+CREATE INDEX IF NOT EXISTS idx_photos_cull_state ON photos (picked, rejected, rating);
+"#;

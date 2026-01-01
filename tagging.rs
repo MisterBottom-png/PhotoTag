@@ -4,10 +4,7 @@ use crate::models::{ExifMetadata, TaggingResult};
 use image::imageops::FilterType;
 use lazy_static::lazy_static;
 use onnxruntime::{
-    environment::Environment,
-    ndarray::Array,
-    session::Session,
-    tensor::OrtOwnedTensor,
+    environment::Environment, ndarray::Array, session::Session, tensor::OrtOwnedTensor,
     GraphOptimizationLevel, LoggingLevel,
 };
 use std::collections::HashMap;
@@ -59,14 +56,20 @@ impl TaggingEngine {
         let scene_session = ORT_ENV.as_ref().and_then(|env| {
             env.new_session_builder()
                 .ok()
-                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
+                .and_then(|b| {
+                    b.with_optimization_level(GraphOptimizationLevel::Basic)
+                        .ok()
+                })
                 .and_then(|b| b.with_model_from_file(scene_model_path).ok())
         });
 
         let detection_session = ORT_ENV.as_ref().and_then(|env| {
             env.new_session_builder()
                 .ok()
-                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
+                .and_then(|b| {
+                    b.with_optimization_level(GraphOptimizationLevel::Basic)
+                        .ok()
+                })
                 .and_then(|b| b.with_model_from_file(detection_model_path).ok())
         });
         if scene_session.is_some() {
@@ -100,7 +103,11 @@ impl TaggingEngine {
         let portrait_score = match self.run_portrait(preview_path, exif) {
             Ok(score) => score,
             Err(err) => {
-                log::warn!("Detection model failed for {}: {}", preview_path.display(), err);
+                log::warn!(
+                    "Detection model failed for {}: {}",
+                    preview_path.display(),
+                    err
+                );
                 0.0
             }
         };
@@ -153,7 +160,10 @@ impl TaggingEngine {
             .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
 
         if outputs.is_empty() {
-            log::warn!("Scene model returned no outputs for {}", preview_path.display());
+            log::warn!(
+                "Scene model returned no outputs for {}",
+                preview_path.display()
+            );
         }
         let logits = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
         // simple mapping: assume first few indices map to our labels; in practice user should update mapping
@@ -191,7 +201,10 @@ impl TaggingEngine {
             .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run detector: {e}")))?;
         if outputs.is_empty() {
-            log::warn!("Detection model returned no outputs for {}", preview_path.display());
+            log::warn!(
+                "Detection model returned no outputs for {}",
+                preview_path.display()
+            );
         }
         let scores = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
         let max_score = scores
@@ -249,7 +262,11 @@ impl TaggingEngine {
 }
 
 fn model_expects_nchw(session: &Session<'_>) -> bool {
-    let dims: Vec<Option<u32>> = session.inputs.get(0).map(|i| i.dimensions.clone()).unwrap_or_default();
+    let dims: Vec<Option<u32>> = session
+        .inputs
+        .get(0)
+        .map(|i| i.dimensions.clone())
+        .unwrap_or_default();
     if dims.len() == 4 {
         match (dims[1], dims[2], dims[3]) {
             (Some(3), Some(_), Some(_)) => return true,
@@ -261,7 +278,11 @@ fn model_expects_nchw(session: &Session<'_>) -> bool {
 }
 
 fn model_input_hw(session: &Session<'_>, default_w: u32, default_h: u32) -> (u32, u32) {
-    let dims: Vec<Option<u32>> = session.inputs.get(0).map(|i| i.dimensions.clone()).unwrap_or_default();
+    let dims: Vec<Option<u32>> = session
+        .inputs
+        .get(0)
+        .map(|i| i.dimensions.clone())
+        .unwrap_or_default();
     if dims.len() == 4 {
         if let (Some(h), Some(w)) = (dims[2], dims[3]) {
             return (w, h);
@@ -278,10 +299,7 @@ fn softmax_first_n(values: &[f32], n: usize) -> Vec<f32> {
         return Vec::new();
     }
     let slice = &values[..values.len().min(n)];
-    let max_val = slice
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_val = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let mut exps = Vec::with_capacity(slice.len());
     let mut sum = 0.0;
     for v in slice {

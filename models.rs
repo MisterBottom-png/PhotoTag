@@ -27,6 +27,11 @@ pub struct PhotoRecord {
     pub gps_lng: Option<f64>,
     pub thumb_path: Option<String>,
     pub preview_path: Option<String>,
+    pub rating: Option<i64>,
+    pub picked: bool,
+    pub rejected: bool,
+    pub last_modified: Option<i64>,
+    pub import_batch_id: Option<String>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
 }
@@ -58,6 +63,8 @@ pub struct QueryFilters {
     pub date_from: Option<i64>,
     pub date_to: Option<i64>,
     pub has_gps: Option<bool>,
+    pub mode: Option<String>,
+    pub smart_view: Option<String>,
     pub sort_by: Option<String>,
     pub sort_dir: Option<String>,
     pub limit: Option<i64>,
@@ -112,4 +119,13 @@ pub struct CsvExportRow {
     pub focal: Option<f64>,
     pub shutter: Option<f64>,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmartViewCounts {
+    pub unsorted: i64,
+    pub picks: i64,
+    pub rejects: i64,
+    pub last_import: i64,
+    pub all: i64,
 }

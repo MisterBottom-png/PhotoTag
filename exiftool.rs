@@ -10,7 +10,10 @@ fn parse_datetime(value: &Option<String>) -> Option<i64> {
         chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S")
             .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
             .ok()
-            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc).timestamp())
+            .map(|dt| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    .timestamp()
+            })
     })
 }
 
@@ -23,7 +26,10 @@ pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata>
         .map_err(|e| Error::Init(format!("Failed to execute ExifTool: {e}")))?;
 
     if !output.status.success() {
-        return Err(Error::Init(format!("ExifTool returned non-zero status for {:?}", file_path)));
+        return Err(Error::Init(format!(
+            "ExifTool returned non-zero status for {:?}",
+            file_path
+        )));
     }
 
     let entries: Vec<Value> = serde_json::from_slice(&output.stdout)?;
@@ -60,13 +66,11 @@ fn parse_datetime_value(entry: &Value, key: &str) -> Option<i64> {
 }
 
 fn get_string(entry: &Value, key: &str) -> Option<String> {
-    entry
-        .get(key)
-        .and_then(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        })
+    entry.get(key).and_then(|v| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
 }
 
 fn get_i64(entry: &Value, key: &str) -> Option<i64> {

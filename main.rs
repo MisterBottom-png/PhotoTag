@@ -14,7 +14,7 @@ mod thumbnails;
 use crate::config::{AppPaths, TaggingConfig};
 use crate::db::DbPool;
 use crate::error::Error;
-use crate::models::{PhotoWithTags, QueryFilters};
+use crate::models::{PhotoWithTags, QueryFilters, SmartViewCounts};
 use crate::scan::scan_folder;
 use crate::tagging::TaggingEngine;
 
@@ -32,7 +32,10 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn query_photos(state: tauri::State<AppState>, filters: QueryFilters) -> InvokeResult<Vec<PhotoWithTags>> {
+fn query_photos(
+    state: tauri::State<AppState>,
+    filters: QueryFilters,
+) -> InvokeResult<Vec<PhotoWithTags>> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     db::query_photos(&conn, filters).map_err(|e| e.to_string())
 }
@@ -44,7 +47,11 @@ fn add_manual_tag(state: tauri::State<AppState>, photo_id: i64, tag: String) -> 
 }
 
 #[tauri::command]
-fn remove_manual_tag(state: tauri::State<AppState>, photo_id: i64, tag: String) -> InvokeResult<()> {
+fn remove_manual_tag(
+    state: tauri::State<AppState>,
+    photo_id: i64,
+    tag: String,
+) -> InvokeResult<()> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     db::remove_tag(&conn, photo_id, &tag).map_err(|e| e.to_string())
 }
@@ -82,13 +89,62 @@ fn rerun_auto(state: tauri::State<AppState>, photo_id: i64) -> InvokeResult<()> 
 }
 
 #[tauri::command]
-fn export_csv(state: tauri::State<AppState>, filters: QueryFilters) -> InvokeResult<Vec<crate::models::CsvExportRow>> {
+fn set_rating(
+    state: tauri::State<AppState>,
+    photo_id: i64,
+    rating: Option<i64>,
+) -> InvokeResult<()> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::set_rating(&conn, photo_id, rating).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_picked(state: tauri::State<AppState>, photo_id: i64, value: bool) -> InvokeResult<()> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::set_picked(&conn, photo_id, value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_rejected(state: tauri::State<AppState>, photo_id: i64, value: bool) -> InvokeResult<()> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::set_rejected(&conn, photo_id, value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn batch_update_cull(
+    state: tauri::State<AppState>,
+    photo_ids: Vec<i64>,
+    rating: Option<Option<i64>>,
+    picked: Option<bool>,
+    rejected: Option<bool>,
+) -> InvokeResult<()> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::batch_update_cull(&conn, &photo_ids, rating, picked, rejected)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_smart_views_counts(state: tauri::State<AppState>) -> InvokeResult<SmartViewCounts> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::get_smart_view_counts(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_csv(
+    state: tauri::State<AppState>,
+    filters: QueryFilters,
+) -> InvokeResult<Vec<crate::models::CsvExportRow>> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     db::export_csv(&conn, filters).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn import_folder(path: String, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> InvokeResult<()> {
+async fn import_folder(
+    path: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> InvokeResult<()> {
     let db = state.db.clone();
     let paths = state.paths.clone();
     let tagging = state.tagging.clone();
@@ -124,7 +180,12 @@ fn main() {
             add_manual_tag,
             remove_manual_tag,
             rerun_auto,
-            export_csv
+            export_csv,
+            set_rating,
+            toggle_picked,
+            toggle_rejected,
+            batch_update_cull,
+            get_smart_views_counts
         ])
         .run(context)
         .expect("error while running tauri application");
