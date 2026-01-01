@@ -128,6 +128,14 @@ function resolvePath(path) {
   return path ? convertFileSrc(path) : null;
 }
 
+function formatExposureTime(value) {
+  if (!value) return "–";
+  if (value >= 1) return `${value.toFixed(1)}s`;
+  const denom = Math.round(1 / value);
+  if (!denom || !Number.isFinite(denom)) return `${value.toFixed(4)}s`;
+  return `1/${denom}s`;
+}
+
 function GalleryGrid({ photos, onSelect, selectedId }) {
   return (
     <div className="gallery">
@@ -200,7 +208,7 @@ function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun }) {
           <span>ISO: {photo.iso || "–"}</span>
           <span>F/{photo.fnumber || "–"}</span>
           <span>{photo.focal_length ? `${photo.focal_length}mm` : "–"}</span>
-          <span>{photo.exposure_time ? `${photo.exposure_time}s` : "–"}</span>
+          <span>{formatExposureTime(photo.exposure_time)}</span>
         </div>
       </div>
       <h4>Tags</h4>
