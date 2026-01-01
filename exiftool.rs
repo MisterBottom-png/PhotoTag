@@ -52,7 +52,7 @@ fn parse_datetime(value: &Option<String>) -> Option<i64> {
         chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S")
             .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
             .ok()
-            .map(|dt| chrono::DateTime::<chrono::Utc>::from_utc(dt, chrono::Utc).timestamp())
+            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc).timestamp())
     })
 }
 

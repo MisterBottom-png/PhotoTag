@@ -29,18 +29,23 @@ pub struct TaggingEngine {
 
 impl TaggingEngine {
     pub fn new(config: TaggingConfig) -> Result<Self> {
+        let scene_model_path: &'static Path =
+            Box::leak(config.scene_model_path.clone().into_boxed_path());
+        let detection_model_path: &'static Path =
+            Box::leak(config.detection_model_path.clone().into_boxed_path());
+
         let scene_session = ORT_ENV.as_ref().and_then(|env| {
             env.new_session_builder()
                 .ok()
                 .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
-                .and_then(|b| b.with_model_from_file(&config.scene_model_path).ok())
+                .and_then(|b| b.with_model_from_file(scene_model_path).ok())
         });
 
         let detection_session = ORT_ENV.as_ref().and_then(|env| {
             env.new_session_builder()
                 .ok()
                 .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Basic).ok())
-                .and_then(|b| b.with_model_from_file(&config.detection_model_path).ok())
+                .and_then(|b| b.with_model_from_file(detection_model_path).ok())
         });
 
         Ok(Self {
