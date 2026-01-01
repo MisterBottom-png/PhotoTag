@@ -18,7 +18,7 @@ Before you begin, ensure you have the following installed:
 
 1.  **Rust**: https://www.rust-lang.org/tools/install
 2.  **Node.js**: https://nodejs.org/
-3.  **Tauri Prerequisites**: Follow the official Tauri guide for your OS, especially the "Build" section for WebView2. Tauri Guide
+3.  **Tauri Prerequisites**: Follow the official Tauri guide for your OS, especially the "Build" section for WebView2. [Tauri Prerequisites Guide](https://tauri.app/v1/guides/getting-started/prerequisites)
 
 ## Acquiring Models and Binaries
 
@@ -30,20 +30,20 @@ This application relies on external binaries and machine learning models that mu
 *   **How to get it**:
     1.  Download the **Windows Executable** from the ExifTool Website.
     2.  Rename `exiftool(-k).exe` to `exiftool.exe`.
-    3.  Create a `bin` directory in `src-tauri` and place `exiftool.exe` inside it. The final path should be `src-tauri/bin/exiftool.exe`.
+    3.  Create a `bin` directory at the project root and place `exiftool.exe` inside it. The final path should be `bin/exiftool.exe`.
 
 ### 2. ONNX Models
 
 *   **What they are**: Pre-trained machine learning models for scene classification and object detection.
 *   **How to get them**:
-    *   **Scene Classifier**: Download a CPU-friendly model like MobileNet or EfficientNet from the ONNX Model Zoo.
+    *   **Scene Classifier**: Download a CPU-friendly model like [EfficientNet-Lite4](https://github.com/onnx/models/blob/main/vision/classification/efficientnet-lite4/model/efficientnet-lite4-11.onnx) from the ONNX Model Zoo for scene classification.
     *   **Face/Person Detector**: Download a lightweight model like YOLO or a specialized face detector.
 *   **Setup**:
-    1.  Create a `models` directory inside `src-tauri`.
-    2.  Place your downloaded `.onnx` files into this directory.
-    3.  Update the `src-tauri/src/config.rs` file with the correct model filenames.
+    1.  Create a `models` directory at the project root.
+    2.  Place your downloaded `.onnx` files into this `models/` directory.
+    3.  Update the `src/config.rs` file with the correct model filenames.
 
-The `build.rs` script will automatically bundle these files into your final application executable.
+The `build.rs` script is configured to automatically copy the `bin/` and `models/` directories into your final application bundle, ensuring they are available at runtime.
 
 ## Development Setup
 
@@ -74,15 +74,15 @@ To create a standalone executable for distribution:
     ```
 
 2.  **Find the executable**:
-    The installer (`.msi`) and executable will be located in `src-tauri/target/release/bundle/`.
+    The installer (`.msi`) and executable will be located in `target/release/bundle/`.
 
 ## How to Add New Tags
 
 The auto-tagging system is based on mapping ML model outputs to a fixed set of tags. To add a new tag (e.g., `animal`):
 
-1.  **Update Model Mappings**: In `src-tauri/src/tagging.rs`, modify the function that maps scene classification labels to your application's tags. You might need a more advanced classification model if the existing one doesn't recognize the concept.
+1.  **Update Model Mappings**: In `src/tagging.rs`, modify the function that maps scene classification labels to your application's tags. You might need a more advanced classification model if the existing one doesn't recognize the concept.
 
-2.  **Adjust Heuristics**: If the tag relies on object detection (like `portrait`), you may need to add new heuristics in `src-tauri/src/tagging.rs` to interpret the detection results.
+2.  **Adjust Heuristics**: If the tag relies on object detection (like `portrait`), you may need to add new heuristics in `src/tagging.rs` to interpret the detection results.
 
 3.  **Re-run Tagging**: Use the "Re-run Auto Detection" feature in the UI to apply the new logic to your existing photos.
 
