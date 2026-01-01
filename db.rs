@@ -23,6 +23,10 @@ pub fn init_database() -> Result<DbPool> {
     let pool = r2d2::Pool::new(manager)?;
 
     run_migrations(&pool.get()?)?;
+    // Get a connection from the pool. The `get()` method returns a
+    // `PooledConnection`, which smart-points to the actual `Connection`.
+    let conn = pool.get()?;
+    run_migrations(&conn)?;
 
     Ok(pool)
 }
