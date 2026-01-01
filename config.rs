@@ -15,8 +15,8 @@ pub struct TaggingConfig {
 impl Default for TaggingConfig {
     fn default() -> Self {
         Self {
-            scene_model_path: PathBuf::from("models/scene_classifier.onnx"),
-            detection_model_path: PathBuf::from("models/person_detector.onnx"),
+            scene_model_path: PathBuf::from("scene_classifier.onnx"),
+            detection_model_path: PathBuf::from("person_detector.onnx"),
             confidence_threshold: 0.65,
             suggestion_threshold: 0.45,
             portrait_min_area_ratio: 0.10,

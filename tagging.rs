@@ -11,6 +11,7 @@ use onnxruntime::{
     GraphOptimizationLevel, LoggingLevel,
 };
 use std::collections::HashMap;
+use std::env;
 use std::path::Path;
 
 lazy_static! {
@@ -29,6 +30,16 @@ pub struct TaggingEngine {
 
 impl TaggingEngine {
     pub fn new(config: TaggingConfig) -> Result<Self> {
+        let enable_onnx = env::var("PHOTO_TAGGER_ENABLE_ONNX").ok().as_deref() == Some("1");
+        if !enable_onnx {
+            log::warn!("ONNX inference disabled; set PHOTO_TAGGER_ENABLE_ONNX=1 to enable.");
+            return Ok(Self {
+                scene_session: None,
+                detection_session: None,
+                config,
+            });
+        }
+
         let scene_path = config.scene_model_path.clone();
         let detect_path = config.detection_model_path.clone();
         if !scene_path.exists() {
@@ -81,23 +92,16 @@ impl TaggingEngine {
         if portrait_score > 0.0 {
             tags.insert("portrait".into(), portrait_score);
         }
+        if tags.is_empty() {
+            tags.extend(self.heuristic_tags(preview_path, exif));
+        }
 
         Ok(TaggingResult { tags })
     }
 
     fn run_scene(&mut self, preview_path: &Path) -> Result<HashMap<String, f32>> {
         if self.scene_session.is_none() {
-            // simple heuristic fallback based on filename
-            let name = preview_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let mut map = HashMap::new();
-            if name.contains("street") {
-                map.insert("street".into(), 0.7);
-            }
-            return Ok(map);
+            return Ok(HashMap::new());
         }
 
         let session = self.scene_session.as_mut().unwrap();
@@ -167,6 +171,34 @@ impl TaggingEngine {
         } else {
             Ok(0.0)
         }
+    }
+
+    fn heuristic_tags(&self, preview_path: &Path, exif: &ExifMetadata) -> HashMap<String, f32> {
+        let mut tags = HashMap::new();
+        let name = preview_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if name.contains("street") {
+            tags.insert("street".into(), 0.6);
+        }
+        if let (Some(w), Some(h)) = (exif.width, exif.height) {
+            if w > h + (h / 5) {
+                tags.insert("landscape".into(), 0.5);
+            } else if h > w + (w / 5) {
+                tags.insert("portrait".into(), 0.5);
+            }
+        }
+        if let Some(focal) = exif.focal_length {
+            if focal >= 70.0 {
+                tags.insert("portrait".into(), 0.6);
+            }
+        }
+        if exif.gps_lat.is_some() || exif.gps_lng.is_some() {
+            tags.insert("nature".into(), 0.4);
+        }
+        tags
     }
 }
 
