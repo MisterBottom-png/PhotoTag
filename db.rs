@@ -91,6 +91,9 @@ pub fn upsert_photo(conn: &DbConnection, photo: &PhotoRecord) -> Result<i64> {
 }
 
 pub fn replace_auto_tags(conn: &DbConnection, photo_id: i64, tagging: TaggingResult, _exif: &ExifMetadata) -> Result<()> {
+    if tagging.tags.is_empty() {
+        return Ok(());
+    }
     conn.execute(
         "DELETE FROM tags WHERE photo_id = ?1 AND source = 'auto' AND locked = 0",
         params![photo_id],

@@ -282,6 +282,15 @@ button.ghost {
   font-size: 12px;
 }
 
+.error-banner {
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #fecaca;
+  padding: 8px 16px;
+  font-size: 12px;
+  letter-spacing: 0.2px;
+}
+
 @media (max-width: 1100px) {
   .content {
     grid-template-columns: 1fr;

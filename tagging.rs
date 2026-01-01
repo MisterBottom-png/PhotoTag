@@ -90,8 +90,20 @@ impl TaggingEngine {
 
     pub fn classify(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<TaggingResult> {
         let mut tags: HashMap<String, f32> = HashMap::new();
-        let scene_probs = self.run_scene(preview_path).unwrap_or_default();
-        let portrait_score = self.run_portrait(preview_path, exif).unwrap_or(0.0);
+        let scene_probs = match self.run_scene(preview_path) {
+            Ok(map) => map,
+            Err(err) => {
+                log::warn!("Scene model failed for {}: {}", preview_path.display(), err);
+                HashMap::new()
+            }
+        };
+        let portrait_score = match self.run_portrait(preview_path, exif) {
+            Ok(score) => score,
+            Err(err) => {
+                log::warn!("Detection model failed for {}: {}", preview_path.display(), err);
+                0.0
+            }
+        };
 
         if let Some(street) = scene_probs.get("street") {
             tags.insert("street".into(), *street);
@@ -108,6 +120,9 @@ impl TaggingEngine {
         if tags.is_empty() && !self.onnx_enabled {
             tags.extend(self.heuristic_tags(preview_path, exif));
         }
+        if tags.is_empty() {
+            log::info!("No tags produced for {}", preview_path.display());
+        }
 
         Ok(TaggingResult { tags })
     }
@@ -118,9 +133,9 @@ impl TaggingEngine {
         }
 
         let session = self.scene_session.as_mut().unwrap();
+        let (w, h) = model_input_hw(session, 224, 224);
         let img = image::open(preview_path)?;
-        let resized = img.resize(224, 224, FilterType::Triangle).to_rgb32f();
-        let (w, h) = resized.dimensions();
+        let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb32f();
         let nchw = model_expects_nchw(session);
         let input = if nchw {
             rgb32f_to_nchw(&resized, w, h)
@@ -137,13 +152,17 @@ impl TaggingEngine {
             .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
 
-        let logits = outputs[0].as_slice().unwrap_or(&[]);
+        if outputs.is_empty() {
+            log::warn!("Scene model returned no outputs for {}", preview_path.display());
+        }
+        let logits = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
         // simple mapping: assume first few indices map to our labels; in practice user should update mapping
         let mut map = HashMap::new();
         if !logits.is_empty() {
-            map.insert("street".into(), logits.get(0).copied().unwrap_or(0.0));
-            map.insert("landscape".into(), logits.get(1).copied().unwrap_or(0.0));
-            map.insert("nature".into(), logits.get(2).copied().unwrap_or(0.0));
+            let probs = softmax_first_n(logits, 3);
+            map.insert("street".into(), probs.get(0).copied().unwrap_or(0.0));
+            map.insert("landscape".into(), probs.get(1).copied().unwrap_or(0.0));
+            map.insert("nature".into(), probs.get(2).copied().unwrap_or(0.0));
         }
         Ok(map)
     }
@@ -153,9 +172,9 @@ impl TaggingEngine {
             return Ok(0.0);
         }
         let session = self.detection_session.as_mut().unwrap();
+        let (w, h) = model_input_hw(session, 224, 224);
         let img = image::open(preview_path)?;
-        let resized = img.resize(320, 320, FilterType::Triangle).to_rgb8();
-        let (w, h) = resized.dimensions();
+        let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
         let nchw = model_expects_nchw(session);
         let input = if nchw {
             rgb8_to_nchw(&resized, w, h)
@@ -171,14 +190,28 @@ impl TaggingEngine {
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
             .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run detector: {e}")))?;
-        let scores = outputs[0].as_slice().unwrap_or(&[]);
-        let max_score = scores.iter().cloned().fold(0.0, f32::max);
+        if outputs.is_empty() {
+            log::warn!("Detection model returned no outputs for {}", preview_path.display());
+        }
+        let scores = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
+        let max_score = scores
+            .iter()
+            .cloned()
+            .fold(f32::MIN, f32::max)
+            .max(0.0)
+            .min(1.0);
+        log::info!(
+            "Detection score for {}: {:.4} (threshold {:.4})",
+            preview_path.display(),
+            max_score,
+            self.config.portrait_min_area_ratio
+        );
 
         let focal_boost = exif
             .focal_length
             .map(|f| if f > 70.0 { 0.1 } else { 0.0 })
             .unwrap_or(0.0);
-        let score = (max_score + focal_boost).min(1.0);
+        let score = (max_score + focal_boost).min(1.0).max(0.0);
         if score >= self.config.portrait_min_area_ratio {
             Ok(score)
         } else {
@@ -225,6 +258,41 @@ fn model_expects_nchw(session: &Session<'_>) -> bool {
         }
     }
     true
+}
+
+fn model_input_hw(session: &Session<'_>, default_w: u32, default_h: u32) -> (u32, u32) {
+    let dims: Vec<Option<u32>> = session.inputs.get(0).map(|i| i.dimensions.clone()).unwrap_or_default();
+    if dims.len() == 4 {
+        if let (Some(h), Some(w)) = (dims[2], dims[3]) {
+            return (w, h);
+        }
+        if let (Some(h), Some(w)) = (dims[1], dims[2]) {
+            return (w, h);
+        }
+    }
+    (default_w, default_h)
+}
+
+fn softmax_first_n(values: &[f32], n: usize) -> Vec<f32> {
+    if values.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    let slice = &values[..values.len().min(n)];
+    let max_val = slice
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut exps = Vec::with_capacity(slice.len());
+    let mut sum = 0.0;
+    for v in slice {
+        let e = (v - max_val).exp();
+        exps.push(e);
+        sum += e;
+    }
+    if sum <= 0.0 {
+        return vec![0.0; slice.len()];
+    }
+    exps.iter().map(|e| e / sum).collect()
 }
 
 fn rgb32f_to_nhwc(img: &image::Rgb32FImage) -> Vec<f32> {

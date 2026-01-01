@@ -160,9 +160,10 @@ function GalleryGrid({ photos, onSelect, selectedId }) {
 }
 
 function TagList({ tags, onRemove }) {
+  const visibleTags = tags.filter((tag) => tag.confidence != null && tag.confidence >= 0.9);
   return (
     <div className="tag-list">
-      {tags.map((tag) => (
+      {visibleTags.map((tag) => (
         <span key={tag.tag} className="tag-pill">
           {tag.tag}
           {tag.confidence != null && (
@@ -180,7 +181,7 @@ function TagList({ tags, onRemove }) {
   );
 }
 
-function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun, onShowInFolder }) {
+function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun, onShowInFolder, rerunLoading }) {
   const [newTag, setNewTag] = useState("");
 
   if (!selected) {
@@ -234,10 +235,10 @@ function DetailsPanel({ selected, onAddTag, onRemoveTag, onRerun, onShowInFolder
         </button>
       </div>
       <div className="detail-actions">
-        <button className="secondary" onClick={onRerun}>
-          Re-run auto detection
+        <button className="secondary" onClick={onRerun} disabled={rerunLoading}>
+          {rerunLoading ? "Re-running auto detection…" : "Re-run auto detection"}
         </button>
-        <button className="ghost" onClick={onShowInFolder}>
+        <button className="ghost" onClick={onShowInFolder} disabled={rerunLoading}>
           Show in folder
         </button>
       </div>
@@ -250,6 +251,8 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [filters, setFilters] = useState({ tags: [], sort_by: "date_taken", sort_dir: "DESC" });
   const [progress, setProgress] = useState({ discovered: 0, processed: 0, current_file: "" });
+  const [errorMessage, setErrorMessage] = useState("");
+  const [rerunLoading, setRerunLoading] = useState(false);
 
   useEffect(() => {
     const unlisten = listen("import-progress", (event) => {
@@ -262,44 +265,72 @@ export default function App() {
   }, []);
 
   const refresh = async () => {
-    const result = await invoke("query_photos", { filters: { ...filters, limit: 200 } });
-    setPhotos(result);
-    if (selected) {
-      const updated = result.find((p) => p.photo.id === selected.photo.id);
-      setSelected(updated || null);
+    try {
+      const result = await invoke("query_photos", { filters: { ...filters, limit: 200 } });
+      setPhotos(result);
+      if (selected) {
+        const updated = result.find((p) => p.photo.id === selected.photo.id);
+        setSelected(updated || null);
+      }
+    } catch (err) {
+      setErrorMessage(`Failed to load photos: ${err}`);
     }
   };
 
   const handleImport = async () => {
-    const dir = await open({ directory: true, recursive: true });
-    if (dir) {
-      await invoke("import_folder", { path: dir });
-      await refresh();
+    try {
+      const dir = await open({ directory: true, recursive: true });
+      if (dir) {
+        await invoke("import_folder", { path: dir });
+        await refresh();
+      }
+    } catch (err) {
+      setErrorMessage(`Import failed: ${err}`);
     }
   };
 
   const handleAddTag = async (tag) => {
     if (!selected) return;
-    await invoke("add_manual_tag", { photo_id: selected.photo.id, tag });
-    await refresh();
+    try {
+      await invoke("add_manual_tag", { photoId: selected.photo.id, tag });
+      await refresh();
+    } catch (err) {
+      setErrorMessage(`Add tag failed: ${err}`);
+    }
   };
 
   const handleRemoveTag = async (tag) => {
     if (!selected) return;
-    await invoke("remove_manual_tag", { photo_id: selected.photo.id, tag });
-    await refresh();
+    try {
+      await invoke("remove_manual_tag", { photoId: selected.photo.id, tag });
+      await refresh();
+    } catch (err) {
+      setErrorMessage(`Remove tag failed: ${err}`);
+    }
   };
 
   const handleRerun = async () => {
     if (!selected) return;
-    await invoke("rerun_auto", { photo_id: selected.photo.id });
-    await refresh();
+    try {
+      setRerunLoading(true);
+      await invoke("rerun_auto", { photoId: selected.photo.id });
+      await refresh();
+    } catch (err) {
+      setErrorMessage(`Auto detection failed: ${err}`);
+    } finally {
+      setRerunLoading(false);
+    }
   };
 
   const handleShowInFolder = async () => {
     if (!selected?.photo?.path) return;
-    const folder = await dirname(selected.photo.path);
-    await openExternal(folder);
+    try {
+      const folder = await dirname(selected.photo.path);
+      const normalized = folder.replace(/\//g, "\\");
+      await openExternal(normalized);
+    } catch (err) {
+      setErrorMessage(`Show in folder failed: ${err}`);
+    }
   };
 
   const importProgressText = useMemo(() => {
@@ -316,6 +347,10 @@ export default function App() {
           <span className="progress">{importProgressText}</span>
         </div>
       </header>
+      {rerunLoading && (
+        <div className="banner info-banner">Re-running auto detection…</div>
+      )}
+      {errorMessage && <div className="banner error-banner">{errorMessage}</div>}
       <div className="content">
         <FiltersPanel filters={filters} onChange={setFilters} onApply={refresh} />
         <GalleryGrid photos={photos} selectedId={selected?.photo.id} onSelect={setSelected} />
@@ -325,6 +360,7 @@ export default function App() {
           onRemoveTag={handleRemoveTag}
           onRerun={handleRerun}
           onShowInFolder={handleShowInFolder}
+          rerunLoading={rerunLoading}
         />
       </div>
     </div>
