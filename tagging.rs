@@ -29,6 +29,15 @@ pub struct TaggingEngine {
 
 impl TaggingEngine {
     pub fn new(config: TaggingConfig) -> Result<Self> {
+        let scene_path = config.scene_model_path.clone();
+        let detect_path = config.detection_model_path.clone();
+        if !scene_path.exists() {
+            log::warn!("Scene model not found: {}", scene_path.display());
+        }
+        if !detect_path.exists() {
+            log::warn!("Detection model not found: {}", detect_path.display());
+        }
+
         let scene_model_path: &'static Path =
             Box::leak(config.scene_model_path.clone().into_boxed_path());
         let detection_model_path: &'static Path =
