@@ -105,7 +105,9 @@ fn main() {
 
     let context = tauri::generate_context!();
     let paths = AppPaths::discover(context.config()).expect("Failed to discover app paths");
-    let tagging = TaggingConfig::default();
+    let mut tagging = TaggingConfig::default();
+    tagging.scene_model_path = paths.resolve_model(&tagging.scene_model_path);
+    tagging.detection_model_path = paths.resolve_model(&tagging.detection_model_path);
     let db_pool = db::init_database(&paths).expect("Failed to initialize database");
 
     tauri::Builder::default()
