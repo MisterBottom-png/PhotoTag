@@ -1,51 +1,9 @@
 use crate::config::AppPaths;
 use crate::error::{Error, Result};
 use crate::models::ExifMetadata;
-use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
-
-#[derive(Debug, Deserialize, Clone)]
-struct ExifToolEntry {
-    #[serde(rename = "Make")]
-    make: Option<String>,
-    #[serde(rename = "Model")]
-    model: Option<String>,
-    #[serde(rename = "BodySerialNumber")]
-    body_serial: Option<String>,
-    #[serde(rename = "LensModel")]
-    lens_model: Option<String>,
-    #[serde(rename = "Lens")]
-    lens: Option<String>,
-    #[serde(rename = "LensInfo")]
-    lens_info: Option<String>,
-    #[serde(rename = "LensMake")]
-    lens_make: Option<String>,
-    #[serde(rename = "DateTimeOriginal")]
-    date_time_original: Option<String>,
-    #[serde(rename = "CreateDate")]
-    create_date: Option<String>,
-    #[serde(rename = "ModifyDate")]
-    modify_date: Option<String>,
-    #[serde(rename = "ISO")]
-    iso: Option<i64>,
-    #[serde(rename = "FNumber")]
-    fnumber: Option<f64>,
-    #[serde(rename = "FocalLength")]
-    focal_length: Option<f64>,
-    #[serde(rename = "ExposureTime")]
-    exposure_time: Option<f64>,
-    #[serde(rename = "ExposureCompensation")]
-    exposure_comp: Option<f64>,
-    #[serde(rename = "GPSLatitude")]
-    gps_lat: Option<f64>,
-    #[serde(rename = "GPSLongitude")]
-    gps_lng: Option<f64>,
-    #[serde(rename = "ImageWidth")]
-    width: Option<i64>,
-    #[serde(rename = "ImageHeight")]
-    height: Option<i64>,
-}
 
 fn parse_datetime(value: &Option<String>) -> Option<i64> {
     value.as_ref().and_then(|s| {
@@ -68,52 +26,62 @@ pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata>
         return Err(Error::Init(format!("ExifTool returned non-zero status for {:?}", file_path)));
     }
 
-    let entries: Vec<ExifToolEntry> = serde_json::from_slice(&output.stdout)?;
-    let entry = entries.get(0).cloned().unwrap_or(ExifToolEntry {
-        make: None,
-        model: None,
-        body_serial: None,
-        lens_model: None,
-        lens: None,
-        lens_info: None,
-        lens_make: None,
-        date_time_original: None,
-        create_date: None,
-        modify_date: None,
-        iso: None,
-        fnumber: None,
-        focal_length: None,
-        exposure_time: None,
-        exposure_comp: None,
-        gps_lat: None,
-        gps_lng: None,
-        width: None,
-        height: None,
-    });
+    let entries: Vec<Value> = serde_json::from_slice(&output.stdout)?;
+    let entry = entries.get(0).cloned().unwrap_or(Value::Null);
 
-    let lens_value = entry
-        .lens_model
-        .or(entry.lens)
-        .or(entry.lens_info)
-        .or(entry.lens_make);
+    let lens_value = get_string(&entry, "LensModel")
+        .or_else(|| get_string(&entry, "Lens"))
+        .or_else(|| get_string(&entry, "LensInfo"))
+        .or_else(|| get_string(&entry, "LensMake"));
 
     Ok(ExifMetadata {
-        make: entry.make,
-        model: entry.model,
+        make: get_string(&entry, "Make"),
+        model: get_string(&entry, "Model"),
         lens: lens_value,
-        body_serial: entry.body_serial,
-        datetime_original: parse_datetime(&entry.date_time_original)
-            .or_else(|| parse_datetime(&entry.create_date))
-            .or_else(|| parse_datetime(&entry.modify_date)),
-        iso: entry.iso,
-        fnumber: entry.fnumber,
-        focal_length: entry.focal_length,
-        exposure_time: entry.exposure_time,
-        exposure_comp: entry.exposure_comp,
-        gps_lat: entry.gps_lat,
-        gps_lng: entry.gps_lng,
-        width: entry.width,
-        height: entry.height,
+        body_serial: get_string(&entry, "BodySerialNumber"),
+        datetime_original: parse_datetime_value(&entry, "DateTimeOriginal")
+            .or_else(|| parse_datetime_value(&entry, "CreateDate"))
+            .or_else(|| parse_datetime_value(&entry, "ModifyDate")),
+        iso: get_i64(&entry, "ISO"),
+        fnumber: get_f64(&entry, "FNumber"),
+        focal_length: get_f64(&entry, "FocalLength"),
+        exposure_time: get_f64(&entry, "ExposureTime"),
+        exposure_comp: get_f64(&entry, "ExposureCompensation"),
+        gps_lat: get_f64(&entry, "GPSLatitude"),
+        gps_lng: get_f64(&entry, "GPSLongitude"),
+        width: get_i64(&entry, "ImageWidth"),
+        height: get_i64(&entry, "ImageHeight"),
+    })
+}
+
+fn parse_datetime_value(entry: &Value, key: &str) -> Option<i64> {
+    let value = get_string(entry, key);
+    parse_datetime(&value)
+}
+
+fn get_string(entry: &Value, key: &str) -> Option<String> {
+    entry
+        .get(key)
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+}
+
+fn get_i64(entry: &Value, key: &str) -> Option<i64> {
+    entry.get(key).and_then(|v| match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    })
+}
+
+fn get_f64(entry: &Value, key: &str) -> Option<f64> {
+    entry.get(key).and_then(|v| match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
     })
 }
 

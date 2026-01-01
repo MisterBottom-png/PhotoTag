@@ -94,12 +94,19 @@ impl TaggingEngine {
         let session = self.scene_session.as_mut().unwrap();
         let img = image::open(preview_path)?;
         let resized = img.resize(224, 224, FilterType::Triangle).to_rgb32f();
-        let mut input: Vec<f32> = Vec::with_capacity(224 * 224 * 3);
-        for pixel in resized.pixels() {
-            input.extend_from_slice(&[pixel[0], pixel[1], pixel[2]]);
+        let (w, h) = resized.dimensions();
+        let nchw = model_expects_nchw(session);
+        let input = if nchw {
+            rgb32f_to_nchw(&resized, w, h)
+        } else {
+            rgb32f_to_nhwc(&resized)
+        };
+        let input_tensor = if nchw {
+            Array::from_shape_vec((1, 3, h as usize, w as usize), input)
+        } else {
+            Array::from_shape_vec((1, h as usize, w as usize, 3), input)
         }
-        let input_tensor = Array::from_shape_vec((1, 224, 224, 3), input)
-            .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
+        .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
             .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
@@ -122,12 +129,19 @@ impl TaggingEngine {
         let session = self.detection_session.as_mut().unwrap();
         let img = image::open(preview_path)?;
         let resized = img.resize(320, 320, FilterType::Triangle).to_rgb8();
-        let mut input: Vec<f32> = Vec::with_capacity((320 * 320 * 3) as usize);
-        for p in resized.pixels() {
-            input.extend_from_slice(&[p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]);
+        let (w, h) = resized.dimensions();
+        let nchw = model_expects_nchw(session);
+        let input = if nchw {
+            rgb8_to_nchw(&resized, w, h)
+        } else {
+            rgb8_to_nhwc(&resized)
+        };
+        let input_tensor = if nchw {
+            Array::from_shape_vec((1, 3, h as usize, w as usize), input)
+        } else {
+            Array::from_shape_vec((1, h as usize, w as usize, 3), input)
         }
-        let input_tensor = Array::from_shape_vec((1, 320, 320, 3), input)
-            .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
+        .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
             .run(vec![input_tensor])
             .map_err(|e| Error::Init(format!("Failed to run detector: {e}")))?;
@@ -145,6 +159,62 @@ impl TaggingEngine {
             Ok(0.0)
         }
     }
+}
+
+fn model_expects_nchw(session: &Session<'_>) -> bool {
+    let dims: Vec<Option<u32>> = session.inputs.get(0).map(|i| i.dimensions.clone()).unwrap_or_default();
+    if dims.len() == 4 {
+        match (dims[1], dims[2], dims[3]) {
+            (Some(3), Some(_), Some(_)) => return true,
+            (Some(_), Some(_), Some(3)) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+fn rgb32f_to_nhwc(img: &image::Rgb32FImage) -> Vec<f32> {
+    let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    for pixel in img.pixels() {
+        input.extend_from_slice(&[pixel[0], pixel[1], pixel[2]]);
+    }
+    input
+}
+
+fn rgb32f_to_nchw(img: &image::Rgb32FImage, w: u32, h: u32) -> Vec<f32> {
+    let plane = (w * h) as usize;
+    let mut input = vec![0.0; plane * 3];
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        input[idx] = pixel[0];
+        input[idx + plane] = pixel[1];
+        input[idx + plane * 2] = pixel[2];
+    }
+    input
+}
+
+fn rgb8_to_nhwc(img: &image::RgbImage) -> Vec<f32> {
+    let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    for pixel in img.pixels() {
+        input.extend_from_slice(&[
+            pixel[0] as f32 / 255.0,
+            pixel[1] as f32 / 255.0,
+            pixel[2] as f32 / 255.0,
+        ]);
+    }
+    input
+}
+
+fn rgb8_to_nchw(img: &image::RgbImage, w: u32, h: u32) -> Vec<f32> {
+    let plane = (w * h) as usize;
+    let mut input = vec![0.0; plane * 3];
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        input[idx] = pixel[0] as f32 / 255.0;
+        input[idx + plane] = pixel[1] as f32 / 255.0;
+        input[idx + plane * 2] = pixel[2] as f32 / 255.0;
+    }
+    input
 }
 
 #[cfg(test)]
