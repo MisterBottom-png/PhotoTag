@@ -14,6 +14,11 @@ use xxhash_rust::xxh3::xxh3_128;
 const SUPPORTED_EXT: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "cr2", "nef", "arw", "dng"];
 
 pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: AppPaths, tagging: TaggingConfig) -> Result<()> {
+    let root_str = root.to_string_lossy().to_string();
+    let existing_paths = {
+        let conn = pool.get()?;
+        db::list_paths_with_prefix(&conn, &root_str).unwrap_or_default()
+    };
     let discovered: Vec<PathBuf> = WalkDir::new(&root)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -25,6 +30,7 @@ pub fn scan_folder(app: tauri::AppHandle, root: PathBuf, pool: DbPool, paths: Ap
                 .map(|ext| SUPPORTED_EXT.contains(&ext.to_lowercase().as_str()))
                 .unwrap_or(false)
         })
+        .filter(|e| !existing_paths.contains(e.path().to_string_lossy().as_ref()))
         .map(|e| e.into_path())
         .collect();
 

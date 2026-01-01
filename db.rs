@@ -4,6 +4,7 @@ use crate::models::{CsvExportRow, ExifMetadata, PhotoRecord, PhotoWithTags, Quer
 use crate::schema;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 
 pub type DbPool = r2d2::Pool<SqliteConnectionManager>;
 pub type DbConnection = r2d2::PooledConnection<SqliteConnectionManager>;
@@ -102,6 +103,17 @@ pub fn replace_auto_tags(conn: &DbConnection, photo_id: i64, tagging: TaggingRes
         )?;
     }
     Ok(())
+}
+
+pub fn list_paths_with_prefix(conn: &DbConnection, root: &str) -> Result<HashSet<String>> {
+    let like = format!("{}%", root.replace('%', "\\%").replace('_', "\\_"));
+    let mut stmt = conn.prepare("SELECT path FROM photos WHERE path LIKE ?1 ESCAPE '\\\\'")?;
+    let rows = stmt.query_map(params![like], |row| row.get::<_, String>(0))?;
+    let mut paths = HashSet::new();
+    for row in rows {
+        paths.insert(row?);
+    }
+    Ok(paths)
 }
 
 pub fn add_manual_tag(conn: &DbConnection, photo_id: i64, tag: &str) -> Result<()> {

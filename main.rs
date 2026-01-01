@@ -101,7 +101,7 @@ async fn import_folder(path: String, app: tauri::AppHandle, state: tauri::State<
 }
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let context = tauri::generate_context!();
     let paths = AppPaths::discover(context.config()).expect("Failed to discover app paths");
