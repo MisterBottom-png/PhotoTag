@@ -118,19 +118,26 @@ pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata>
 }
 
 pub fn extract_preview(paths: &AppPaths, file_path: &Path, out_path: &Path) -> Result<bool> {
+    let ext = file_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "jpg" || ext == "jpeg" || ext == "png" {
+        return Ok(false);
+    }
+
     let exe = paths.resolve_bin("exiftool.exe");
-    let status = Command::new(exe)
-        .args([
-            "-b",
-            "-PreviewImage",
-            "-JpgFromRaw",
-            "-BigImage",
-            "-o",
-        ])
-        .arg(out_path)
+    let output = Command::new(exe)
+        .args(["-b", "-PreviewImage", "-JpgFromRaw", "-BigImage"])
         .arg(file_path)
-        .status()
+        .output()
         .map_err(|e| Error::Init(format!("Failed to execute ExifTool: {e}")))?;
 
-    Ok(status.success() && out_path.exists())
+    if !output.status.success() || output.stdout.is_empty() {
+        return Ok(false);
+    }
+
+    std::fs::write(out_path, &output.stdout)?;
+    Ok(out_path.exists())
 }
