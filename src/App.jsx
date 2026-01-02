@@ -39,6 +39,20 @@ function formatExposureTime(value) {
   return `1/${denom}s`;
 }
 
+function formatFNumber(value) {
+  if (!value) return "n/a";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return num % 1 === 0 ? num.toFixed(0) : num.toFixed(1);
+}
+
+function formatFocalLength(value) {
+  if (!value) return "n/a";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return num % 1 === 0 ? num.toFixed(0) : num.toFixed(1);
+}
+
 function StarIcon({ filled }) {
   return (
     <svg
@@ -119,6 +133,12 @@ function TagList({ tags, onRemove }) {
 function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, variant }) {
   const sizingStyle = thumbSize ? { "--thumb-size": `${thumbSize}px` } : {};
   const isFilmstrip = variant === "filmstrip";
+  const shutter = formatExposureTime(photo.exposure_time);
+  const fNumber = formatFNumber(photo.fnumber);
+  const focal = formatFocalLength(photo.focal_length);
+  const focalLabel = focal === "n/a" ? "n/a" : `${focal}mm`;
+  const iso = photo.iso ?? "n/a";
+  const hoverMeta = `${shutter} | f/${fNumber} | ${focalLabel} | ISO ${iso}`;
   return (
     <div
       className={`thumb ${isFilmstrip ? "filmstrip" : ""} ${selected ? "selected" : ""}`}
@@ -132,9 +152,14 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, varian
         <div className="thumb-placeholder">No preview</div>
       )}
       {isFilmstrip ? (
-        <div className="thumb-overlay" title={photo.file_name}>
-          {photo.file_name}
-        </div>
+        <>
+          <div className="thumb-hoverbar" title={hoverMeta}>
+            {hoverMeta}
+          </div>
+          <div className="thumb-overlay" title={photo.file_name}>
+            {photo.file_name}
+          </div>
+        </>
       ) : (
         <div className="thumb-caption">
           <div className="filename" title={photo.file_name}>
