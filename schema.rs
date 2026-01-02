@@ -77,3 +77,23 @@ CREATE INDEX IF NOT EXISTS idx_photos_rejected ON photos (rejected);
 CREATE INDEX IF NOT EXISTS idx_photos_import_batch_id ON photos (import_batch_id);
 CREATE INDEX IF NOT EXISTS idx_photos_cull_state ON photos (picked, rejected, rating);
 "#;
+
+pub const MIGRATION_0004: &str = r#"
+-- Perceptual hash for near-duplicate detection
+ALTER TABLE photos ADD COLUMN dhash INTEGER;
+
+CREATE INDEX IF NOT EXISTS idx_photos_dhash ON photos (dhash);
+"#;
+
+pub const MIGRATION_0005: &str = r#"
+-- Embeddings for similarity search
+CREATE TABLE IF NOT EXISTS photo_embeddings (
+    photo_id INTEGER PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    norm REAL NOT NULL DEFAULT 1.0,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_embeddings_norm ON photo_embeddings (norm);
+"#;

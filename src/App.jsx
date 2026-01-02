@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
 import { listen } from "@tauri-apps/api/event";
-import { open as openExternal } from "@tauri-apps/api/shell";
-import { dirname } from "@tauri-apps/api/path";
+import { appWindow } from "@tauri-apps/api/window";
 
 const SORT_OPTIONS = [
   { value: "date_taken", label: "Date (newest)" },
@@ -51,6 +50,25 @@ function formatFocalLength(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value);
   return num % 1 === 0 ? num.toFixed(0) : num.toFixed(1);
+}
+
+function useResizeObserver(ref) {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    if (!ref.current) return;
+    const el = ref.current;
+    const observer = new ResizeObserver((entries) => {
+      if (!entries.length) return;
+      const entry = entries[0];
+      setSize({
+        width: Math.round(entry.contentRect.width),
+        height: Math.round(entry.contentRect.height),
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return size;
 }
 
 function StarIcon({ filled }) {
@@ -109,11 +127,13 @@ function ArrowIcon({ direction = "left" }) {
   );
 }
 
-function TagList({ tags, onRemove }) {
+function TagList({ tags, onRemove, limit, showAll, onToggle }) {
   const sorted = tags.slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+  const visible = showAll || !limit ? sorted : sorted.slice(0, limit);
+  const hiddenCount = sorted.length - visible.length;
   return (
     <div className="tag-list">
-      {sorted.map((tag) => (
+      {visible.map((tag) => (
         <span key={`${tag.tag}-${tag.source}`} className="tag-pill">
           <span>{tag.tag}</span>
           {tag.confidence != null && <span className="confidence">{Math.round(tag.confidence * 100)}%</span>}
@@ -126,12 +146,18 @@ function TagList({ tags, onRemove }) {
         </span>
       ))}
       {!sorted.length && <div className="muted">No tags yet</div>}
+      {hiddenCount > 0 && onToggle && (
+        <button className="tag-toggle" onClick={onToggle}>
+          {showAll ? "Show top 3" : `Show all (${hiddenCount + visible.length})`}
+        </button>
+      )}
     </div>
   );
 }
 
-function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, variant }) {
+function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, variant, style }) {
   const sizingStyle = thumbSize ? { "--thumb-size": `${thumbSize}px` } : {};
+  const mergedStyle = { ...sizingStyle, ...style };
   const isFilmstrip = variant === "filmstrip";
   const shutter = formatExposureTime(photo.exposure_time);
   const fNumber = formatFNumber(photo.fnumber);
@@ -139,15 +165,22 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, varian
   const hoverMeta = `${shutter} | ${fNumber} | ${iso}`;
   return (
     <div
-      className={`thumb ${isFilmstrip ? "filmstrip" : ""} ${selected ? "selected" : ""}`}
+      className={`thumb ${isFilmstrip ? "filmstrip" : ""} ${selected ? "selected" : ""} ${
+        photo.picked ? "picked" : photo.rejected ? "rejected" : ""
+      }`}
       onClick={onSelect}
       onDoubleClick={onDoubleClick}
-      style={sizingStyle}
+      style={mergedStyle}
     >
       {photo.thumb_path ? (
         <img src={resolvePath(photo.thumb_path)} alt={photo.file_name} />
       ) : (
         <div className="thumb-placeholder">No preview</div>
+      )}
+      {(photo.picked || photo.rejected) && (
+        <div className={`thumb-badge ${photo.rejected ? "reject" : "pick"}`}>
+          {photo.rejected ? "Reject" : "Pick"}
+        </div>
       )}
       {isFilmstrip ? (
         <div className="thumb-overlay" title={`${photo.file_name} | ${hoverMeta}`}>
@@ -166,6 +199,82 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, varian
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function VirtualizedGallery({ photos, thumbSize, selection, onSelect, onDoubleClick, activeIndex }) {
+  const scrollRef = useRef(null);
+  const { width, height } = useResizeObserver(scrollRef);
+  const [scrollTop, setScrollTop] = useState(0);
+  const gap = 12;
+  const padding = 8;
+  const rowHeight = thumbSize + 70;
+  const columns = Math.max(1, Math.floor((width - padding * 2 + gap) / (thumbSize + gap)));
+  const totalRows = Math.ceil(photos.length / columns);
+  const totalHeight = totalRows * rowHeight + padding * 2;
+  const overscan = 2;
+  const startRow = Math.max(0, Math.floor((scrollTop - overscan * rowHeight) / rowHeight));
+  const endRow = Math.min(
+    totalRows - 1,
+    Math.ceil((scrollTop + height + overscan * rowHeight) / rowHeight)
+  );
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => setScrollTop(el.scrollTop);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!scrollRef.current || activeIndex == null || activeIndex < 0) return;
+    const row = Math.floor(activeIndex / columns);
+    const rowTop = row * rowHeight;
+    const rowBottom = rowTop + rowHeight;
+    const viewTop = scrollRef.current.scrollTop;
+    const viewBottom = viewTop + height;
+    if (rowTop < viewTop) {
+      scrollRef.current.scrollTo({ top: Math.max(rowTop - padding, 0), behavior: "smooth" });
+    } else if (rowBottom > viewBottom) {
+      scrollRef.current.scrollTo({ top: rowBottom - height + padding, behavior: "smooth" });
+    }
+  }, [activeIndex, columns, height, rowHeight, padding]);
+
+  const visibleItems = useMemo(() => {
+    const items = [];
+    for (let row = startRow; row <= endRow; row += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const index = row * columns + col;
+        if (index >= photos.length) break;
+        const photo = photos[index];
+        items.push(
+          <ThumbCard
+            key={photo.photo.id}
+            photo={photo.photo}
+            selected={selection.includes(photo.photo.id)}
+            onSelect={(e) => onSelect(photo.photo.id, index, e)}
+            onDoubleClick={() => onDoubleClick(photo.photo.id)}
+            thumbSize={thumbSize}
+            style={{
+              position: "absolute",
+              top: padding + row * rowHeight,
+              left: padding + col * (thumbSize + gap),
+              width: thumbSize,
+            }}
+          />
+        );
+      }
+    }
+    return items;
+  }, [photos, selection, thumbSize, columns, startRow, endRow, padding, gap, rowHeight, onSelect, onDoubleClick]);
+
+  return (
+    <div className="gallery virtualized" ref={scrollRef}>
+      <div className="gallery-inner" style={{ height: totalHeight }}>
+        {visibleItems}
+      </div>
     </div>
   );
 }
@@ -245,14 +354,37 @@ export default function App() {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [thumbSize, setThumbSize] = usePersistentState("pt-thumb-size", 190);
   const [autoAdvance, setAutoAdvance] = usePersistentState("pt-auto-advance", true);
+  const [lastImportPath, setLastImportPath] = usePersistentState("pt-last-import", "");
   const [photos, setPhotos] = useState([]);
   const [selection, setSelection] = useState([]);
   const [cursorIndex, setCursorIndex] = useState(0);
-  const [progress, setProgress] = useState({ discovered: 0, processed: 0, current_file: "" });
+  const [progress, setProgress] = useState({
+    discovered: 0,
+    processed: 0,
+    errors: 0,
+    current_file: "",
+    current_stage: "",
+    throughput: null,
+    stages: [],
+    canceled: false,
+  });
+  const [importJobId, setImportJobId] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [rerunLoading, setRerunLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState(null);
+  const [zoomMode, setZoomMode] = usePersistentState("pt-zoom-mode", "FIT");
+  const [fullscreen, setFullscreen] = useState(false);
+  const [imageReady, setImageReady] = useState(false);
+  const [showAllTags, setShowAllTags] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [duplicateGroups, setDuplicateGroups] = useState([]);
+  const [duplicateThreshold, setDuplicateThreshold] = usePersistentState("pt-dup-threshold", 8);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [reviewedGroups, setReviewedGroups] = useState(() => new Set());
+  const [similarOpen, setSimilarOpen] = useState(false);
+  const [similarResults, setSimilarResults] = useState([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
   const lastActionRef = useRef(null);
   const searchRef = useRef(null);
   const anchorRef = useRef(null);
@@ -266,13 +398,39 @@ export default function App() {
 
   useEffect(() => {
     const unlisten = listen("import-progress", (event) => {
-      setProgress(event.payload);
+      setProgress((prev) => ({ ...prev, ...event.payload }));
     });
     refreshPhotos({ resetCursor: true });
+    invoke("is_importing")
+      .then((value) => setImporting(Boolean(value)))
+      .catch(() => null);
     return () => {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    setImageReady(false);
+  }, [activePhoto?.photo?.preview_path]);
+
+  useEffect(() => {
+    if (mode === "CULL") {
+      setShowAllTags(false);
+    }
+  }, [activePhoto?.photo?.id, mode]);
+
+  useEffect(() => {
+    setSimilarOpen(false);
+    setSimilarResults([]);
+  }, [activePhoto?.photo?.id]);
+
+  useEffect(() => {
+    if (!duplicatesOpen || mode !== "BROWSE") return;
+    const handle = setTimeout(() => {
+      loadDuplicates();
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [duplicatesOpen, duplicateThreshold, mode]);
 
   useEffect(() => {
     setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
@@ -297,6 +455,36 @@ export default function App() {
   }, [toast]);
 
   useEffect(() => {
+    let unlisten;
+    appWindow
+      .onFileDropEvent(async (event) => {
+        if (event.payload?.type !== "drop") return;
+        const paths = event.payload?.paths || [];
+        if (!paths.length) return;
+        handleDroppedPaths(paths);
+      })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => null);
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [importing, lastImportPath, mode]);
+
+  useEffect(() => {
+    if (!importing) return;
+    const hasStages = Array.isArray(progress.stages) && progress.stages.length > 0;
+    const pending = hasStages ? progress.stages.reduce((sum, s) => sum + (s.pending || 0) + (s.in_progress || 0), 0) : 0;
+    const done = progress.discovered > 0 && pending === 0;
+    if (done) {
+      setImporting(false);
+      setImportJobId(null);
+      refreshPhotos({ resetCursor: true });
+    }
+  }, [importing, progress]);
+
+  useEffect(() => {
     refreshPhotos({ resetCursor: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smartView, filters.sort_by, filters.search, mode]);
@@ -312,6 +500,10 @@ export default function App() {
       if (isInput && e.key !== "Escape") return;
       if (!photos.length) return;
       switch (e.key) {
+        case " ":
+          e.preventDefault();
+          setZoomMode((mode) => (mode === "FIT" ? "ONE_TO_ONE" : "FIT"));
+          break;
         case "ArrowRight":
           e.preventDefault();
           moveCursor(1);
@@ -349,6 +541,11 @@ export default function App() {
         case "Escape":
           setSelection([]);
           break;
+        case "f":
+        case "F":
+          e.preventDefault();
+          handleToggleFullscreen();
+          break;
         default:
           break;
       }
@@ -356,6 +553,14 @@ export default function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [photos.length, cursorIndex, selection, smartView]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
 
   const updateSelectionAfterRefresh = (list, options) => {
     if (!list.length) {
@@ -468,18 +673,37 @@ export default function App() {
   };
 
   const handleImport = async () => {
+    let pickedDir = null;
     try {
-      const dir = await open({ directory: true, recursive: true });
-      if (dir) {
+      pickedDir = await open({
+        directory: true,
+        recursive: true,
+        defaultPath: lastImportPath || undefined,
+      });
+      if (pickedDir) {
         setImporting(true);
-        await invoke("import_folder", { path: dir });
+        const startedJobId = await invoke("import_folder", { path: pickedDir });
+        setImportJobId(startedJobId);
+        setLastImportPath(pickedDir);
         setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
-        await refreshPhotos({ resetCursor: true });
       }
     } catch (err) {
       setErrorMessage(`Import failed: ${err}`);
-    } finally {
       setImporting(false);
+    } finally {
+      if (!pickedDir) {
+        setImporting(false);
+      }
+    }
+  };
+
+  const handleCancelImport = async () => {
+    try {
+      await invoke("cancel_import");
+      setImporting(false);
+      setImportJobId(null);
+    } catch (err) {
+      setErrorMessage(`Cancel failed: ${err}`);
     }
   };
 
@@ -520,11 +744,123 @@ export default function App() {
   const handleShowInFolder = async () => {
     if (!activePhoto?.photo?.path) return;
     try {
-      const folder = await dirname(activePhoto.photo.path);
-      const normalized = folder.replace(/\//g, "\\");
-      await openExternal(normalized);
+      await invoke("show_in_folder", { path: activePhoto.photo.path });
     } catch (err) {
       setErrorMessage(`Show in folder failed: ${err}`);
+    }
+  };
+
+  const loadDuplicates = async () => {
+    try {
+      setDuplicatesLoading(true);
+      const groups = await invoke("find_duplicates", { threshold: duplicateThreshold });
+      setDuplicateGroups(groups || []);
+    } catch (err) {
+      setErrorMessage(`Find duplicates failed: ${err}`);
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  };
+
+  const markGroupReviewed = (groupId) => {
+    setReviewedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
+  const resolveBestPhotoId = (group) => {
+    const activeId = activePhoto?.photo?.id;
+    const activeInGroup = group.photos.find((p) => p.id === activeId);
+    if (activeInGroup) return activeInGroup.id;
+    return group.photos.reduce((best, current) => {
+      const bestArea = (best.width || 0) * (best.height || 0);
+      const currentArea = (current.width || 0) * (current.height || 0);
+      if (currentArea !== bestArea) return currentArea > bestArea ? current : best;
+      return current.size > best.size ? current : best;
+    }, group.photos[0]).id;
+  };
+
+  const handlePickBest = async (group) => {
+    const bestId = resolveBestPhotoId(group);
+    const otherIds = group.photos.filter((p) => p.id !== bestId).map((p) => p.id);
+    try {
+      await invoke("batch_update_cull", { photoIds: [bestId], picked: true, rejected: false });
+      if (otherIds.length) {
+        await invoke("batch_update_cull", { photoIds: otherIds, rejected: true, picked: false });
+      }
+      setToast({ message: "Picked best and rejected others.", canUndo: true });
+      refreshPhotos();
+    } catch (err) {
+      setErrorMessage(`Pick best failed: ${err}`);
+    }
+  };
+
+  const handleRejectOthers = async (group) => {
+    const keepId = resolveBestPhotoId(group);
+    const otherIds = group.photos.filter((p) => p.id !== keepId).map((p) => p.id);
+    if (!otherIds.length) return;
+    try {
+      await invoke("batch_update_cull", { photoIds: otherIds, rejected: true, picked: false });
+      setToast({ message: "Rejected duplicates.", canUndo: true });
+      refreshPhotos();
+    } catch (err) {
+      setErrorMessage(`Reject others failed: ${err}`);
+    }
+  };
+
+  const handleFindSimilar = async () => {
+    if (!activePhoto) return;
+    try {
+      setSimilarLoading(true);
+      setSimilarOpen(true);
+      const results = await invoke("find_similar", { photoId: activePhoto.photo.id, limit: 12 });
+      setSimilarResults(results || []);
+    } catch (err) {
+      setErrorMessage(`Find similar failed: ${err}`);
+    } finally {
+      setSimilarLoading(false);
+    }
+  };
+
+  const handleDroppedPaths = async (paths) => {
+    if (!paths.length) return;
+    if (importing && !window.confirm("Import already running. Cancel and start a new one?")) {
+      return;
+    }
+    if (importing) {
+      await handleCancelImport();
+    }
+    for (const path of paths) {
+      try {
+        const isDir = await invoke("is_directory", { path });
+        if (isDir) {
+          setImporting(true);
+          const startedJobId = await invoke("import_folder", { path });
+          setImportJobId(startedJobId);
+          setLastImportPath(path);
+          setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
+          return;
+        }
+      } catch (err) {
+        setErrorMessage(`Drop import failed: ${err}`);
+        return;
+      }
+    }
+    setToast({ message: "Dropped files ignored (folders only).", canUndo: false });
+  };
+
+  const handleToggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (err) {
+      setErrorMessage(`Fullscreen failed: ${err}`);
     }
   };
 
@@ -580,11 +916,21 @@ export default function App() {
 
   const importProgressText = useMemo(() => {
     if (!progress.discovered) return importing ? "Importing..." : "Idle";
-    return `Processing ${progress.processed}/${progress.discovered}`;
+    const throughput = progress.throughput ? ` • ${progress.throughput.toFixed(1)}/sec` : "";
+    return `Processing ${progress.processed}/${progress.discovered}${throughput}`;
   }, [progress, importing]);
 
+  const stageSummary = useMemo(() => {
+    if (!Array.isArray(progress.stages) || !progress.stages.length) return null;
+    return progress.stages.map((stage) => {
+      const pending = (stage.pending || 0) + (stage.in_progress || 0);
+      const rate = stage.items_per_sec ? `${stage.items_per_sec.toFixed(1)}/sec` : null;
+      return { ...stage, pending, rate };
+    });
+  }, [progress.stages]);
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${fullscreen ? "fullscreen" : ""} mode-${mode.toLowerCase()}`}>
       <header>
         <div className="brand">
           <h1>PhotoTag</h1>
@@ -621,7 +967,42 @@ export default function App() {
           <button onClick={handleImport} disabled={importing}>
             {importing ? "Importing..." : "Import Folder"}
           </button>
+          {mode === "BROWSE" && (
+            <button
+              className={duplicatesOpen ? "ghost active" : "ghost"}
+              onClick={() => {
+                const next = !duplicatesOpen;
+                setDuplicatesOpen(next);
+                if (next) loadDuplicates();
+              }}
+            >
+              Duplicates
+            </button>
+          )}
+          {importing && (
+            <button className="ghost" onClick={handleCancelImport}>
+              Cancel Import
+            </button>
+          )}
           <span className="progress">{importProgressText}</span>
+          {importing && stageSummary && (
+            <div className="progress-detail">
+              <div className="progress-stage">
+                <strong>Stage:</strong> {progress.current_stage || "scan"}
+              </div>
+              <div className="progress-grid">
+                {stageSummary.map((stage) => (
+                  <div key={stage.stage} className="progress-row">
+                    <span className="label">{stage.stage}</span>
+                    <span className="value">{stage.pending || 0} pending</span>
+                    <span className="value">{stage.completed || 0} done</span>
+                    {stage.rate && <span className="muted">{stage.rate}</span>}
+                  </div>
+                ))}
+              </div>
+              {progress.errors > 0 && <div className="progress-errors">{progress.errors} errors</div>}
+            </div>
+          )}
         </div>
       </header>
 
@@ -727,25 +1108,38 @@ export default function App() {
                         <ArrowIcon direction="left" />
                       </button>
                     </div>
-                    <div className="preview-media">
+                    <div
+                      className={`preview-media ${zoomMode === "ONE_TO_ONE" ? "zoomed" : ""} ${
+                        activePhoto?.photo.picked ? "picked" : activePhoto?.photo.rejected ? "rejected" : ""
+                      }`}
+                    >
                       {activePhoto?.photo.preview_path ? (
                         <>
                           <img
                             src={resolvePath(activePhoto.photo.preview_path)}
                             alt=""
-                            className="preview-blur"
+                            className={`preview-blur ${imageReady ? "ready" : ""}`}
                             aria-hidden="true"
                           />
                           <img
                             src={resolvePath(activePhoto.photo.preview_path)}
                             alt={activePhoto.photo.file_name}
-                            className="preview-large"
+                            className={`preview-large ${zoomMode === "ONE_TO_ONE" ? "zoomed" : ""} ${
+                              imageReady ? "ready" : ""
+                            }`}
+                            onLoad={() => setImageReady(true)}
                           />
                         </>
                       ) : (
                         <div className="thumb-placeholder large">No preview</div>
                       )}
+                      {(activePhoto?.photo.picked || activePhoto?.photo.rejected) && (
+                        <div className={`preview-status ${activePhoto?.photo.rejected ? "reject" : "pick"}`}>
+                          {activePhoto?.photo.rejected ? "Rejected" : "Picked"}
+                        </div>
+                      )}
                     </div>
+                    <div className="zoom-indicator">{zoomMode === "ONE_TO_ONE" ? "1:1" : "Fit"}</div>
                     <div className="preview-gutter right">
                       <button className="nav-arrow next" onClick={() => moveCursor(1)} aria-label="Next photo">
                         <ArrowIcon direction="right" />
@@ -788,24 +1182,84 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="gallery" style={{ ["--thumb-size"]: `${thumbSize}px` }}>
-              {photos.map((p, idx) => (
-                <ThumbCard
-                  key={p.photo.id}
-                  photo={p.photo}
-                  selected={selection.includes(p.photo.id)}
-                  onSelect={(e) => onSelectPhoto(p.photo.id, idx, e)}
-                  onDoubleClick={() => setSelection([p.photo.id])}
-                  thumbSize={thumbSize}
-                />
-              ))}
-            </div>
+            <VirtualizedGallery
+              photos={photos}
+              thumbSize={thumbSize}
+              selection={selection}
+              activeIndex={cursorIndex}
+              onSelect={onSelectPhoto}
+              onDoubleClick={(id) => setSelection([id])}
+            />
           )}
         </main>
 
         <aside className="panel details">
           {activePhoto ? (
             <>
+              {mode === "BROWSE" && duplicatesOpen && (
+                <div className="duplicates-panel">
+                  <div className="section-head">
+                    <h4>Near-duplicates</h4>
+                    <button className="ghost" onClick={loadDuplicates} disabled={duplicatesLoading}>
+                      {duplicatesLoading ? "Scanning..." : "Refresh"}
+                    </button>
+                  </div>
+                  <div className="dup-controls">
+                    <label>
+                      Threshold
+                      <input
+                        type="range"
+                        min="4"
+                        max="16"
+                        value={duplicateThreshold}
+                        onChange={(e) => setDuplicateThreshold(Number(e.target.value))}
+                      />
+                    </label>
+                    <span className="muted">{duplicateThreshold}</span>
+                  </div>
+                  {duplicateGroups.length === 0 && !duplicatesLoading && (
+                    <div className="muted">No near-duplicates found.</div>
+                  )}
+                  <div className="dup-groups">
+                    {duplicateGroups.map((group) => (
+                      <div
+                        key={group.representative}
+                        className={`dup-group ${reviewedGroups.has(group.representative) ? "reviewed" : ""}`}
+                      >
+                        <div className="dup-row">
+                          <span className="muted">{group.photos.length} photos</span>
+                          <div className="dup-actions">
+                            <button className="small ghost" onClick={() => handlePickBest(group)}>
+                              Pick best
+                            </button>
+                            <button className="small ghost" onClick={() => handleRejectOthers(group)}>
+                              Reject others
+                            </button>
+                            <button className="small ghost" onClick={() => markGroupReviewed(group.representative)}>
+                              {reviewedGroups.has(group.representative) ? "Unreview" : "Reviewed"}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="dup-thumbs">
+                          {group.photos.map((photo) => (
+                            <button
+                              key={photo.id}
+                              className="dup-thumb"
+                              onClick={() => setSelection([photo.id])}
+                            >
+                              {photo.thumb_path ? (
+                                <img src={resolvePath(photo.thumb_path)} alt={photo.file_name} />
+                              ) : (
+                                <div className="thumb-placeholder">No preview</div>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="detail-head">
                 <div className="detail-title">
                   <div className="file-title">{activePhoto.photo.file_name}</div>
@@ -814,6 +1268,9 @@ export default function App() {
                 <div className="detail-actions">
                   <button className="ghost show-folder" onClick={handleShowInFolder}>
                     Show in folder
+                  </button>
+                  <button className="ghost" onClick={handleFindSimilar}>
+                    Find similar
                   </button>
                 </div>
               </div>
@@ -867,8 +1324,47 @@ export default function App() {
                     />
                   </div>
                 </div>
-                <TagList tags={activePhoto.tags} onRemove={handleRemoveTag} />
+                <TagList
+                  tags={activePhoto.tags}
+                  onRemove={handleRemoveTag}
+                  limit={mode === "CULL" ? 3 : null}
+                  showAll={mode === "CULL" ? showAllTags : true}
+                  onToggle={mode === "CULL" ? () => setShowAllTags((v) => !v) : null}
+                />
               </div>
+              {similarOpen && (
+                <div className="similar-panel">
+                  <div className="section-head">
+                    <h4>Similar photos</h4>
+                    <button className="ghost small" onClick={() => setSimilarOpen(false)}>
+                      Hide
+                    </button>
+                  </div>
+                  {similarLoading && <div className="muted">Searching...</div>}
+                  {!similarLoading && similarResults.length === 0 && (
+                    <div className="muted">No embeddings yet for similar search.</div>
+                  )}
+                  <div className="similar-grid">
+                    {similarResults.map((item) => (
+                      <button
+                        key={item.id}
+                        className="similar-card"
+                        onClick={() => setSelection([item.id])}
+                      >
+                        {item.thumb_path ? (
+                          <img src={resolvePath(item.thumb_path)} alt={item.file_name} />
+                        ) : (
+                          <div className="thumb-placeholder">No preview</div>
+                        )}
+                        <div className="similar-meta">
+                          <span>{item.file_name}</span>
+                          <span className="muted">{item.score.toFixed(2)}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="detail-actions dual">
                 <button className="secondary" onClick={handleRerun} disabled={rerunLoading}>
                   {rerunLoading ? "Processing..." : "Re-run auto tagging"}

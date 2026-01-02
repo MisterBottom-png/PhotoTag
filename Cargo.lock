@@ -2087,8 +2087,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "onnxruntime"
 version = "0.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f420aa8537acfc1d1849ba3c52f5e7dcb7e4a42ef3c3909fea39b2166c0a08d"
 dependencies = [
  "lazy_static",
  "ndarray",
@@ -2318,6 +2316,7 @@ name = "photo-tagger"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crossbeam-channel",
  "env_logger",
  "image",
  "lazy_static",
@@ -2333,6 +2332,7 @@ dependencies = [
  "tauri-build",
  "thiserror",
  "tokio",
+ "uuid",
  "walkdir",
  "xxhash-rust",
 ]
@@ -3923,6 +3923,7 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "rand 0.9.2",
+ "serde_core",
  "wasm-bindgen",
 ]
 

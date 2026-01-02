@@ -27,6 +27,7 @@ pub struct PhotoRecord {
     pub gps_lng: Option<f64>,
     pub thumb_path: Option<String>,
     pub preview_path: Option<String>,
+    pub dhash: Option<i64>,
     pub rating: Option<i64>,
     pub picked: bool,
     pub rejected: bool,
@@ -81,7 +82,49 @@ pub struct PhotoWithTags {
 pub struct ImportProgressEvent {
     pub discovered: usize,
     pub processed: usize,
+    pub errors: usize,
     pub current_file: Option<String>,
+    pub current_stage: Option<String>,
+    pub throughput: Option<f32>,
+    pub stages: Vec<StageProgress>,
+    pub canceled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicatePhoto {
+    pub id: i64,
+    pub path: String,
+    pub file_name: String,
+    pub thumb_path: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub size: i64,
+    pub dhash: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub representative: i64,
+    pub photos: Vec<DuplicatePhoto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimilarPhoto {
+    pub id: i64,
+    pub path: String,
+    pub file_name: String,
+    pub thumb_path: Option<String>,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StageProgress {
+    pub stage: String,
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub errors: usize,
+    pub items_per_sec: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

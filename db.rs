@@ -1,8 +1,9 @@
 use crate::config::AppPaths;
 use crate::error::Result;
+use crate::embedding;
 use crate::models::{
-    CsvExportRow, ExifMetadata, PhotoRecord, PhotoWithTags, QueryFilters, SmartViewCounts,
-    TagRecord, TaggingResult,
+    CsvExportRow, DuplicateGroup, DuplicatePhoto, ExifMetadata, PhotoRecord, PhotoWithTags,
+    QueryFilters, SimilarPhoto, SmartViewCounts, TagRecord, TaggingResult,
 };
 use crate::schema;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -52,6 +53,8 @@ fn run_migrations(connection: &DbConnection) -> Result<()> {
         ("0001", schema::MIGRATION_0001),
         ("0002", schema::MIGRATION_0002),
         ("0003", schema::MIGRATION_0003),
+        ("0004", schema::MIGRATION_0004),
+        ("0005", schema::MIGRATION_0005),
     ];
 
     for (version, migration) in migrations {
@@ -59,6 +62,10 @@ fn run_migrations(connection: &DbConnection) -> Result<()> {
             log::info!("Applying migration {version}...");
             if version == "0003" {
                 apply_migration_0003(connection)?;
+            } else if version == "0004" {
+                apply_migration_0004(connection)?;
+            } else if version == "0005" {
+                apply_migration_0005(connection)?;
             } else {
                 connection.execute_batch(migration)?;
             }
@@ -140,6 +147,22 @@ fn apply_migration_0003(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_migration_0004(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "photos", "dhash")? {
+        conn.execute("ALTER TABLE photos ADD COLUMN dhash INTEGER", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_dhash ON photos (dhash)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn apply_migration_0005(conn: &Connection) -> Result<()> {
+    conn.execute_batch(schema::MIGRATION_0005)?;
+    Ok(())
+}
+
 pub fn upsert_photo(conn: &DbConnection, photo: &PhotoRecord) -> Result<i64> {
     // Check existing record
     let existing: Option<(i64, i64, i64)> = conn
@@ -184,13 +207,14 @@ pub fn upsert_photo(conn: &DbConnection, photo: &PhotoRecord) -> Result<i64> {
             gps_lng,
             thumb_path,
             preview_path,
+            dhash,
             import_batch_id,
             created_at,
             updated_at,
             last_modified
         )
         VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
             strftime('%s','now'),
             strftime('%s','now'),
             strftime('%s','now')
@@ -216,6 +240,7 @@ pub fn upsert_photo(conn: &DbConnection, photo: &PhotoRecord) -> Result<i64> {
             gps_lng = excluded.gps_lng,
             thumb_path = excluded.thumb_path,
             preview_path = excluded.preview_path,
+            dhash = excluded.dhash,
             updated_at = strftime('%s','now'),
             last_modified = strftime('%s','now')",
         params![
@@ -240,6 +265,7 @@ pub fn upsert_photo(conn: &DbConnection, photo: &PhotoRecord) -> Result<i64> {
             photo.gps_lng,
             photo.thumb_path,
             photo.preview_path,
+            photo.dhash,
             photo.import_batch_id,
         ],
     )?;
@@ -604,6 +630,7 @@ pub fn query_photos(conn: &DbConnection, filters: QueryFilters) -> Result<Vec<Ph
             gps_lng: row.get("gps_lng")?,
             thumb_path: row.get("thumb_path")?,
             preview_path: row.get("preview_path")?,
+            dhash: row.get("dhash")?,
             rating: row.get("rating")?,
             picked: row.get::<_, i64>("picked")? == 1,
             rejected: row.get::<_, i64>("rejected")? == 1,
@@ -664,6 +691,7 @@ pub fn get_photo(conn: &DbConnection, photo_id: i64) -> Result<Option<PhotoWithT
             gps_lng: row.get("gps_lng")?,
             thumb_path: row.get("thumb_path")?,
             preview_path: row.get("preview_path")?,
+            dhash: row.get("dhash")?,
             rating: row.get("rating")?,
             picked: row.get::<_, i64>("picked")? == 1,
             rejected: row.get::<_, i64>("rejected")? == 1,
@@ -697,4 +725,249 @@ pub fn export_csv(conn: &DbConnection, filters: QueryFilters) -> Result<Vec<CsvE
         })
         .collect();
     Ok(rows)
+}
+
+pub fn upsert_embedding(
+    conn: &DbConnection,
+    photo_id: i64,
+    embedding_vec: &[f32],
+    norm: f32,
+) -> Result<()> {
+    let blob = embedding::serialize_embedding(embedding_vec);
+    conn.execute(
+        "INSERT INTO photo_embeddings (photo_id, embedding, norm, updated_at) VALUES (?1, ?2, ?3, strftime('%s','now'))
+         ON CONFLICT(photo_id) DO UPDATE SET embedding = excluded.embedding, norm = excluded.norm, updated_at = strftime('%s','now')",
+        params![photo_id, blob, norm],
+    )?;
+    Ok(())
+}
+
+pub fn get_embedding(conn: &DbConnection, photo_id: i64) -> Result<Option<(Vec<f32>, f32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT embedding, norm FROM photo_embeddings WHERE photo_id = ?1",
+    )?;
+    let row = stmt
+        .query_row(params![photo_id], |row| {
+            let blob: Vec<u8> = row.get(0)?;
+            let norm: f32 = row.get(1)?;
+            Ok((embedding::deserialize_embedding(&blob), norm))
+        })
+        .optional()?;
+    Ok(row)
+}
+
+pub fn find_similar(conn: &DbConnection, photo_id: i64, limit: i64) -> Result<Vec<SimilarPhoto>> {
+    let Some((target_vec, target_norm)) = get_embedding(conn, photo_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.path, p.file_name, p.thumb_path, e.embedding, e.norm
+         FROM photo_embeddings e
+         JOIN photos p ON p.id = e.photo_id
+         WHERE e.photo_id != ?1",
+    )?;
+    let rows = stmt.query_map(params![photo_id], |row| {
+        let id: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        let file_name: String = row.get(2)?;
+        let thumb_path: Option<String> = row.get(3)?;
+        let blob: Vec<u8> = row.get(4)?;
+        let norm: f32 = row.get(5)?;
+        Ok((id, path, file_name, thumb_path, blob, norm))
+    })?;
+
+    let mut scored = Vec::new();
+    for row in rows {
+        let (id, path, file_name, thumb_path, blob, norm) = row?;
+        let vec = embedding::deserialize_embedding(&blob);
+        if vec.len() != target_vec.len() {
+            continue;
+        }
+        let score = cosine_similarity(&target_vec, target_norm, &vec, norm);
+        if score.is_finite() {
+            scored.push(SimilarPhoto {
+                id,
+                path,
+                file_name,
+                thumb_path,
+                score,
+            });
+        }
+    }
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    if scored.len() as i64 > limit {
+        scored.truncate(limit as usize);
+    }
+    Ok(scored)
+}
+
+fn cosine_similarity(a: &[f32], a_norm: f32, b: &[f32], b_norm: f32) -> f32 {
+    let mut dot = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+    }
+    let denom = a_norm * b_norm;
+    if denom <= 0.0 {
+        return 0.0;
+    }
+    (dot / denom).max(-1.0).min(1.0)
+}
+
+pub fn find_duplicates(conn: &DbConnection, threshold: u32) -> Result<Vec<DuplicateGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, file_name, thumb_path, width, height, size, dhash FROM photos WHERE dhash IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DuplicatePhoto {
+            id: row.get("id")?,
+            path: row.get("path")?,
+            file_name: row.get("file_name")?,
+            thumb_path: row.get("thumb_path")?,
+            width: row.get("width")?,
+            height: row.get("height")?,
+            size: row.get("size")?,
+            dhash: row.get("dhash")?,
+        })
+    })?;
+
+    let mut photos: Vec<DuplicatePhoto> = Vec::new();
+    for row in rows {
+        photos.push(row?);
+    }
+    if photos.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let mut buckets: std::collections::HashMap<u16, Vec<usize>> = std::collections::HashMap::new();
+    for (idx, photo) in photos.iter().enumerate() {
+        let hash = photo.dhash as u64;
+        let segments = [
+            ((hash >> 48) & 0xffff) as u16,
+            ((hash >> 32) & 0xffff) as u16,
+            ((hash >> 16) & 0xffff) as u16,
+            (hash & 0xffff) as u16,
+        ];
+        for seg in segments {
+            buckets.entry(seg).or_default().push(idx);
+        }
+    }
+
+    let mut union = UnionFind::new(photos.len());
+    let mut seen_pairs = std::collections::HashSet::new();
+    for indices in buckets.values() {
+        for i in 0..indices.len() {
+            for j in (i + 1)..indices.len() {
+                let a = indices[i];
+                let b = indices[j];
+                let key = if a < b { (a, b) } else { (b, a) };
+                if !seen_pairs.insert(key) {
+                    continue;
+                }
+                let ha = photos[a].dhash as u64;
+                let hb = photos[b].dhash as u64;
+                if hamming_distance(ha, hb) <= threshold {
+                    union.union(a, b);
+                }
+            }
+        }
+    }
+
+    let mut groups: std::collections::HashMap<usize, Vec<DuplicatePhoto>> =
+        std::collections::HashMap::new();
+    for (idx, photo) in photos.into_iter().enumerate() {
+        let root = union.find(idx);
+        groups.entry(root).or_default().push(photo);
+    }
+
+    let mut result = Vec::new();
+    for mut group in groups.into_values() {
+        if group.len() < 2 {
+            continue;
+        }
+        group.sort_by(|a, b| a.id.cmp(&b.id));
+        let representative = group.first().map(|p| p.id).unwrap_or(0);
+        result.push(DuplicateGroup {
+            representative,
+            photos: group,
+        });
+    }
+    result.sort_by(|a, b| b.photos.len().cmp(&a.photos.len()));
+    Ok(result)
+}
+
+fn hamming_distance(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+            rank: vec![0; size],
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]);
+        }
+        self.parent[x]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let root_a = self.find(a);
+        let root_b = self.find(b);
+        if root_a == root_b {
+            return;
+        }
+        if self.rank[root_a] < self.rank[root_b] {
+            self.parent[root_a] = root_b;
+        } else if self.rank[root_a] > self.rank[root_b] {
+            self.parent[root_b] = root_a;
+        } else {
+            self.parent[root_b] = root_a;
+            self.rank[root_a] += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hamming_distance_counts_bits() {
+        assert_eq!(hamming_distance(0b1010, 0b0011), 3);
+        assert_eq!(hamming_distance(0, u64::MAX), 64);
+    }
+
+    #[test]
+    fn union_find_clusters() {
+        let mut uf = UnionFind::new(4);
+        uf.union(0, 1);
+        uf.union(2, 3);
+        let a = uf.find(0);
+        let b = uf.find(1);
+        let c = uf.find(2);
+        let d = uf.find(3);
+        assert_eq!(a, b);
+        assert_eq!(c, d);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn cosine_similarity_scores() {
+        let a = vec![1.0f32, 0.0, 0.0];
+        let b = vec![1.0f32, 0.0, 0.0];
+        let c = vec![0.0f32, 1.0, 0.0];
+        let score_same = cosine_similarity(&a, 1.0, &b, 1.0);
+        let score_orthogonal = cosine_similarity(&a, 1.0, &c, 1.0);
+        assert!(score_same > 0.99);
+        assert!(score_orthogonal.abs() < 0.01);
+    }
 }

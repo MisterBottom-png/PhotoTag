@@ -4,9 +4,10 @@
 mod config;
 mod db;
 mod error;
+mod embedding;
 mod exiftool;
+mod jobs;
 mod models;
-mod scan;
 mod schema;
 mod tagging;
 mod thumbnails;
@@ -14,12 +15,13 @@ mod thumbnails;
 use crate::config::{AppPaths, TaggingConfig};
 use crate::db::DbPool;
 use crate::error::Error;
+use crate::jobs::JobManager;
 use crate::models::{PhotoWithTags, QueryFilters, SmartViewCounts};
-use crate::scan::scan_folder;
 use crate::tagging::TaggingEngine;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::Command;
 
 type InvokeResult<T> = std::result::Result<T, String>;
 
@@ -27,6 +29,7 @@ pub struct AppState {
     db: DbPool,
     paths: AppPaths,
     tagging: TaggingConfig,
+    jobs: JobManager,
 }
 
 fn resolve_model_path(
@@ -176,20 +179,76 @@ fn export_csv(
 }
 
 #[tauri::command]
+fn find_duplicates(
+    state: tauri::State<AppState>,
+    threshold: Option<u32>,
+) -> InvokeResult<Vec<crate::models::DuplicateGroup>> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let threshold = threshold.unwrap_or(8).min(20);
+    db::find_duplicates(&conn, threshold).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn find_similar(
+    state: tauri::State<AppState>,
+    photo_id: i64,
+    limit: Option<i64>,
+) -> InvokeResult<Vec<crate::models::SimilarPhoto>> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(12).clamp(1, 50);
+    db::find_similar(&conn, photo_id, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn import_folder(
     path: String,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> InvokeResult<()> {
-    let db = state.db.clone();
-    let paths = state.paths.clone();
-    let tagging = state.tagging.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        scan_folder(app, std::path::PathBuf::from(path), db, paths, tagging)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))?;
-    result.map_err(|e| e.to_string())
+) -> InvokeResult<String> {
+    state
+        .jobs
+        .start_import(
+            app,
+            std::path::PathBuf::from(path),
+            state.db.clone(),
+            state.paths.clone(),
+            state.tagging.clone(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_import(state: tauri::State<AppState>) -> InvokeResult<()> {
+    state.jobs.cancel_current().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_import_file(state: tauri::State<AppState>, path: String) -> InvokeResult<()> {
+    state.jobs.cancel_file(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn is_importing(state: tauri::State<AppState>) -> InvokeResult<bool> {
+    Ok(state.jobs.is_importing())
+}
+
+#[tauri::command]
+fn is_directory(path: String) -> InvokeResult<bool> {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_dir())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn show_in_folder(path: String) -> InvokeResult<()> {
+    if path.trim().is_empty() {
+        return Err("No file path provided".into());
+    }
+    Command::new("explorer")
+        .arg(format!("/select,{}", path))
+        .spawn()
+        .map_err(|e| format!("Failed to open Explorer: {e}"))?;
+    Ok(())
 }
 
 fn main() {
@@ -224,11 +283,17 @@ fn main() {
             db: db_pool,
             paths,
             tagging,
+            jobs: JobManager::default(),
         })
         .setup(|_app| Ok(()))
         .invoke_handler(tauri::generate_handler![
             greet,
             import_folder,
+            cancel_import,
+            cancel_import_file,
+            is_importing,
+            is_directory,
+            show_in_folder,
             query_photos,
             add_manual_tag,
             remove_manual_tag,
@@ -238,7 +303,9 @@ fn main() {
             toggle_picked,
             toggle_rejected,
             batch_update_cull,
-            get_smart_views_counts
+            get_smart_views_counts,
+            find_duplicates,
+            find_similar
         ])
         .run(context)
         .expect("error while running tauri application");

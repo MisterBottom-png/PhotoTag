@@ -33,6 +33,7 @@ thiserror = "1.0.58"
 
 # Async
 tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
 
 # Utilities
 lazy_static = "1.4.0"
