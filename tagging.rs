@@ -741,6 +741,7 @@ const SCENE_GROUP_TOPK: usize = 10;
 const SCENE_GROUP_MIN_LABELS: usize = 2;
 const SCENE_UNRELATED_PENALTY: f32 = 0.6;
 const DETECTION_MIN_SCORE: f32 = 0.25;
+const DETECTION_PAIR_FOREGROUND_INDEX: usize = 1;
 const DETECTION_TAG_BOOST: f32 = 0.30;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -952,18 +953,17 @@ fn detection_scores_from_pair(
     }
     let mut scores: HashMap<usize, f32> = HashMap::new();
     for row in slice.chunks_exact(cols) {
-        for (idx, raw) in row.iter().enumerate() {
-            if !raw.is_finite() {
-                continue;
-            }
-            let score = raw.max(0.0).min(1.0);
-            if score < DETECTION_MIN_SCORE {
-                continue;
-            }
-            let entry = scores.entry(idx).or_insert(0.0);
-            if score > *entry {
-                *entry = score;
-            }
+        let raw = row.get(DETECTION_PAIR_FOREGROUND_INDEX).copied().unwrap_or(0.0);
+        if !raw.is_finite() {
+            continue;
+        }
+        let score = sigmoid(raw);
+        if score < DETECTION_MIN_SCORE {
+            continue;
+        }
+        let entry = scores.entry(DETECTION_PAIR_FOREGROUND_INDEX).or_insert(0.0);
+        if score > *entry {
+            *entry = score;
         }
     }
     Some(scores)
