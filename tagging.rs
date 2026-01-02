@@ -36,7 +36,16 @@ pub struct TaggingEngine {
 
 impl TaggingEngine {
     pub fn new(config: TaggingConfig) -> Result<Self> {
-        let enable_onnx = env::var("PHOTO_TAGGER_ENABLE_ONNX").ok().as_deref() == Some("1");
+        let enable_onnx = match env::var("PHOTO_TAGGER_ENABLE_ONNX")
+            .ok()
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase())
+        {
+            Some(v) if v == "0" || v == "false" => false,
+            Some(v) if v == "1" || v == "true" => true,
+            Some(_) => true,
+            None => true,
+        };
         if !enable_onnx {
             log::warn!("ONNX inference disabled; set PHOTO_TAGGER_ENABLE_ONNX=1 to enable.");
             return Ok(Self {
