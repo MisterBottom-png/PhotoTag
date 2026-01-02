@@ -52,8 +52,13 @@ struct SessionCacheKey {
     preference: InferenceDevicePreference,
 }
 
+struct UnsafeSession(Session<'static>);
+
+unsafe impl Send for UnsafeSession {}
+unsafe impl Sync for UnsafeSession {}
+
 struct SessionHandle {
-    session: Mutex<Session<'static>>,
+    session: Mutex<UnsafeSession>,
     provider: InferenceProvider,
     label: &'static str,
     model_path: &'static Path,
@@ -340,8 +345,8 @@ impl TaggingEngine {
         let session_handle = self.scene_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 224, 224);
-            (w, h, model_expects_nchw(&session))
+            let (w, h) = model_input_hw(&session.0, 224, 224);
+            (w, h, model_expects_nchw(&session.0))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -538,8 +543,8 @@ impl TaggingEngine {
         let session_handle = self.detection_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 640, 640);
-            (w, h, model_expects_nchw(&session))
+            let (w, h) = model_input_hw(&session.0, 640, 640);
+            (w, h, model_expects_nchw(&session.0))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -563,12 +568,11 @@ impl TaggingEngine {
         .map_err(|e| Error::Init(format!("Invalid detection tensor shape: {e}")))?;
         let decode_preprocess = decode_start.elapsed();
         let infer_start = Instant::now();
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = {
-            let mut session = session_handle.session.lock().unwrap();
-            session
-                .run(vec![input_tensor])
-                .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?
-        };
+        let mut session = session_handle.session.lock().unwrap();
+        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
+            .0
+            .run(vec![input_tensor])
+            .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?;
         let inference_time = infer_start.elapsed();
         if !outputs.is_empty() {
             let shapes = outputs
@@ -739,8 +743,8 @@ impl TaggingEngine {
         let session_handle = self.face_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 224, 224);
-            (w, h, model_expects_nchw(&session))
+            let (w, h) = model_input_hw(&session.0, 224, 224);
+            (w, h, model_expects_nchw(&session.0))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -760,12 +764,11 @@ impl TaggingEngine {
         .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
         let decode_preprocess = decode_start.elapsed();
         let infer_start = Instant::now();
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = {
-            let mut session = session_handle.session.lock().unwrap();
-            session
-                .run(vec![input_tensor])
-                .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?
-        };
+        let mut session = session_handle.session.lock().unwrap();
+        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
+            .0
+            .run(vec![input_tensor])
+            .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?;
         let inference_time = infer_start.elapsed();
         if outputs.is_empty() {
             log::warn!(
@@ -1822,12 +1825,11 @@ fn run_scene_logits(
     .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
     let preprocess_time = prep_start.elapsed();
     let infer_start = Instant::now();
-    let outputs: Vec<OrtOwnedTensor<f32, _>> = {
-        let mut session = session_handle.session.lock().unwrap();
-        session
-            .run(vec![input_tensor])
-            .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))? 
-    };
+    let mut session = session_handle.session.lock().unwrap();
+    let outputs: Vec<OrtOwnedTensor<f32, _>> = session
+        .0
+        .run(vec![input_tensor])
+        .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
     let inference_time = infer_start.elapsed();
     if outputs.is_empty() {
         log::warn!("Scene model returned no outputs");
@@ -1973,7 +1975,7 @@ fn create_session_with_preference(
     );
 
     Ok(SessionHandle {
-        session: Mutex::new(session),
+        session: Mutex::new(UnsafeSession(session)),
         provider,
         label,
         model_path: model_path_static,
