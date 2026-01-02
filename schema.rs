@@ -64,8 +64,11 @@ pub const MIGRATION_0003: &str = r#"
 ALTER TABLE photos ADD COLUMN rating INTEGER;
 ALTER TABLE photos ADD COLUMN picked INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE photos ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE photos ADD COLUMN last_modified INTEGER NOT NULL DEFAULT (strftime('%s', 'now'));
+ALTER TABLE photos ADD COLUMN last_modified INTEGER;
 ALTER TABLE photos ADD COLUMN import_batch_id TEXT;
+
+-- Backfill last_modified for existing rows (will be set on insert/update in code)
+UPDATE photos SET last_modified = strftime('%s', 'now') WHERE last_modified IS NULL;
 
 -- Cull workflow indexes
 CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos (rating);

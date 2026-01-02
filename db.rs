@@ -57,7 +57,11 @@ fn run_migrations(connection: &DbConnection) -> Result<()> {
     for (version, migration) in migrations {
         if !applied.contains(version) {
             log::info!("Applying migration {version}...");
-            connection.execute_batch(migration)?;
+            if version == "0003" {
+                apply_migration_0003(connection)?;
+            } else {
+                connection.execute_batch(migration)?;
+            }
             connection.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
                 params![version],
@@ -65,6 +69,74 @@ fn run_migrations(connection: &DbConnection) -> Result<()> {
         }
     }
     log::info!("Migrations applied successfully.");
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in rows {
+        if col? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn apply_migration_0003(conn: &Connection) -> Result<()> {
+    let columns = [
+        ("rating", "ALTER TABLE photos ADD COLUMN rating INTEGER"),
+        (
+            "picked",
+            "ALTER TABLE photos ADD COLUMN picked INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "rejected",
+            "ALTER TABLE photos ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_modified",
+            "ALTER TABLE photos ADD COLUMN last_modified INTEGER",
+        ),
+        (
+            "import_batch_id",
+            "ALTER TABLE photos ADD COLUMN import_batch_id TEXT",
+        ),
+    ];
+
+    for (name, sql) in columns {
+        if !column_exists(conn, "photos", name)? {
+            conn.execute(sql, [])?;
+        }
+    }
+
+    conn.execute(
+        "UPDATE photos SET last_modified = strftime('%s','now') WHERE last_modified IS NULL",
+        [],
+    )?;
+
+    // Indexes
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos (rating)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_picked ON photos (picked)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_rejected ON photos (rejected)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_import_batch_id ON photos (import_batch_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_cull_state ON photos (picked, rejected, rating)",
+        [],
+    )?;
+
     Ok(())
 }
 

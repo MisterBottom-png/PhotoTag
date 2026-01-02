@@ -22,7 +22,7 @@ const SORT_OPTIONS = [
   { value: "file_name", label: "Filename" },
 ];
 
-const DEFAULT_FILTERS = { search: "", sort_by: "date_taken", sort_dir: "DESC" };
+const DEFAULT_FILTERS = { search: "", tags: [], sort_by: "date_taken", sort_dir: "DESC" };
 
 function usePersistentState(key, defaultValue) {
   const [value, setValue] = useState(() => {
@@ -71,7 +71,7 @@ function StarIcon({ filled }) {
   );
 }
 
-function RatingStars({ value, onChange, compact }) {
+function RatingStars({ value, onChange, compact, showClear = false }) {
   return (
     <div className={`rating-stars ${compact ? "compact" : ""}`}>
       {[1, 2, 3, 4, 5].map((n) => (
@@ -79,9 +79,11 @@ function RatingStars({ value, onChange, compact }) {
           <StarIcon filled={value >= n} />
         </button>
       ))}
-      <button className="clear" onClick={() => onChange(null)}>
-        Clear
-      </button>
+      {showClear && (
+        <button className="clear" onClick={() => onChange(null)}>
+          Clear
+        </button>
+      )}
     </div>
   );
 }
@@ -136,12 +138,12 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize }) {
 
 function SelectionBar({ count, onRate, onPick, onReject, onClear, onTag }) {
   const [tagText, setTagText] = useState("");
-  if (!count) return null;
+  if (count <= 1) return null;
   return (
     <div className="selection-bar">
       <span>{count} selected</span>
       <div className="selection-actions">
-        <RatingStars value={0} onChange={onRate} compact />
+        <RatingStars value={0} onChange={onRate} compact showClear />
         <button className="ghost" onClick={onPick}>
           Pick
         </button>
@@ -205,6 +207,7 @@ function EmptyState({ onImport, onClearFilters }) {
 export default function App() {
   const [mode, setMode] = usePersistentState("pt-mode", "CULL");
   const [smartView, setSmartView] = useState("UNSORTED");
+  const [browseSmartView, setBrowseSmartView] = usePersistentState("pt-browse-smart-view", "ALL");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [thumbSize, setThumbSize] = usePersistentState("pt-thumb-size", 190);
   const [autoAdvance, setAutoAdvance] = usePersistentState("pt-auto-advance", true);
@@ -220,6 +223,7 @@ export default function App() {
   const lastActionRef = useRef(null);
   const searchRef = useRef(null);
   const anchorRef = useRef(null);
+  const toastTimerRef = useRef(null);
 
   const activePhoto = useMemo(() => {
     if (!selection.length) return photos[0] || null;
@@ -238,10 +242,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (mode === "CULL" && smartView === "ALL") {
+    if (mode === "CULL") {
       setSmartView("UNSORTED");
+    } else {
+      setSmartView(browseSmartView || "ALL");
     }
-  }, [mode, smartView]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  useEffect(() => {
+    if (!toast) return;
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 3500);
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    };
+  }, [toast]);
 
   useEffect(() => {
     refreshPhotos({ resetCursor: true });
@@ -337,11 +361,12 @@ export default function App() {
   const refreshPhotos = async (options = {}) => {
     try {
       const limit = mode === "CULL" ? 500 : 800;
+      const effectiveSmartView = mode === "CULL" ? "UNSORTED" : smartView;
       const result = await invoke("query_photos", {
         filters: {
           ...filters,
           mode,
-          smart_view: smartView === "ALL" ? null : smartView,
+          smart_view: effectiveSmartView === "ALL" ? null : effectiveSmartView,
           sort_by: filters.sort_by || (mode === "CULL" ? "last_modified" : "date_taken"),
           limit,
         },
@@ -364,8 +389,8 @@ export default function App() {
   const applyCullChange = async ({ rating, picked, rejected, label }) => {
     const ids = selection.length
       ? selection
-      : photos[cursorIndex]
-      ? [photos[cursorIndex].photo.id]
+      : activePhoto
+      ? [activePhoto.photo.id]
       : [];
     if (!ids.length) return;
     const before = photos
@@ -382,7 +407,13 @@ export default function App() {
       if (rating !== undefined) payload.rating = rating;
       if (picked !== undefined) payload.picked = picked;
       if (rejected !== undefined) payload.rejected = rejected;
-      await invoke("batch_update_cull", payload);
+
+      // When only clearing rating, some bindings ignore null in batch; call dedicated setter.
+      if (rating === null && picked === undefined && rejected === undefined) {
+        await Promise.all(ids.map((id) => invoke("set_rating", { photoId: id, rating: null })));
+      } else {
+        await invoke("batch_update_cull", payload);
+      }
       lastActionRef.current = { before };
       setToast({ message: label || "Updated", canUndo: true });
       await refreshCounts();
@@ -474,12 +505,19 @@ export default function App() {
     const { before } = lastActionRef.current;
     try {
       for (const entry of before) {
-        await invoke("batch_update_cull", {
-          photoIds: [entry.id],
+        const changes = {
           rating: entry.rating ?? null,
           picked: entry.picked,
           rejected: entry.rejected,
-        });
+        };
+        if (changes.rating === null && changes.picked === undefined && changes.rejected === undefined) {
+          await invoke("set_rating", { photoId: entry.id, rating: null });
+        } else {
+          await invoke("batch_update_cull", {
+            photoIds: [entry.id],
+            ...changes,
+          });
+        }
       }
       await refreshCounts();
       await refreshPhotos();
@@ -561,18 +599,26 @@ export default function App() {
               </button>
             </div>
             <div className="smart-list">
-              {SMART_VIEWS.map((view) => {
+              {SMART_VIEWS.filter((v) => mode === "CULL" ? v.key === "UNSORTED" : true).map((view) => {
                 const countKey = view.key.toLowerCase();
                 const countValue = counts[countKey] ?? (view.key === "ALL" ? counts.all : 0);
+                const disabled = mode === "CULL";
                 return (
                   <button
                     key={view.key}
-                    className={`smart-item ${smartView === view.key ? "active" : ""}`}
-                    onClick={() => setSmartView(view.key)}
+                    className={`smart-item ${smartView === view.key ? "active" : ""} ${disabled ? "disabled" : ""}`}
+                    onClick={() => {
+                      if (disabled) return;
+                      setSmartView(view.key);
+                      setBrowseSmartView(view.key);
+                    }}
+                    disabled={disabled}
                   >
                     <div>
                       <div className="label">{view.label}</div>
-                      <div className="helper">{view.helper}</div>
+                      <div className="helper">
+                        {disabled ? "Other smart views are available in Browse." : view.helper}
+                      </div>
                     </div>
                     <span className="count">{countValue ?? 0}</span>
                   </button>
@@ -623,7 +669,12 @@ export default function App() {
               onImport={handleImport}
               onClearFilters={() => {
                 setFilters(DEFAULT_FILTERS);
-                setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
+                if (mode === "CULL") {
+                  setSmartView("UNSORTED");
+                } else {
+                  setSmartView("ALL");
+                  setBrowseSmartView("ALL");
+                }
               }}
             />
           ) : mode === "CULL" ? (

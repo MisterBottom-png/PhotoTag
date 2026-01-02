@@ -17,6 +17,7 @@ use crate::error::Error;
 use crate::models::{PhotoWithTags, QueryFilters, SmartViewCounts};
 use crate::scan::scan_folder;
 use crate::tagging::TaggingEngine;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 type InvokeResult<T> = std::result::Result<T, String>;
 
@@ -80,10 +81,23 @@ fn rerun_auto(state: tauri::State<AppState>, photo_id: i64) -> InvokeResult<()> 
         height: photo.photo.height,
     };
     if let Some(preview) = &photo.photo.preview_path {
-        let tagging = engine
-            .classify(std::path::Path::new(preview), &exif)
-            .map_err(|e| e.to_string())?;
-        db::replace_auto_tags(&conn, photo_id, tagging, &exif).map_err(|e| e.to_string())?;
+        match catch_unwind(AssertUnwindSafe(|| {
+            engine.classify(std::path::Path::new(preview), &exif)
+        })) {
+            Ok(Ok(tagging)) => {
+                db::replace_auto_tags(&conn, photo_id, tagging, &exif)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(Err(err)) => {
+                log::warn!("Auto tagging failed for {}: {}", preview, err);
+            }
+            Err(_) => {
+                log::warn!(
+                    "ONNX runtime panicked while tagging {}; skipping auto tags",
+                    preview
+                );
+            }
+        }
     }
     Ok(())
 }

@@ -16,7 +16,7 @@ path = "main.rs"
 tauri-build = { version = "1.5", features = [] }
 
 [dependencies]
-tauri = { version = "1.6.0", features = [ "dialog-all", "path-all", "fs-all", "shell-open"] }
+tauri = { version = "1.6.0", features = [ "dialog-all", "path-all", "fs-all", "shell-open", "protocol-asset"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.8.3"
@@ -45,3 +45,6 @@ uuid = { version = "1.7", features = ["v4", "serde"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+[patch.crates-io]
+onnxruntime = { path = "vendor/onnxruntime" }

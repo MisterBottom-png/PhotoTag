@@ -9,14 +9,17 @@ use onnxruntime::{
 };
 use std::collections::HashMap;
 use std::env;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 lazy_static! {
-    static ref ORT_ENV: Option<Environment> = Environment::builder()
+    static ref ORT_ENV: Option<&'static Environment> = Environment::builder()
         .with_name("photo-tagging")
         .with_log_level(LoggingLevel::Warning)
         .build()
-        .ok();
+        .ok()
+        .map(|env| Box::leak(Box::new(env)))
+        .map(|env_ref| env_ref as &'static Environment);
 }
 
 pub struct TaggingEngine {
@@ -53,25 +56,15 @@ impl TaggingEngine {
         let detection_model_path: &'static Path =
             Box::leak(config.detection_model_path.clone().into_boxed_path());
 
-        let scene_session = ORT_ENV.as_ref().and_then(|env| {
-            env.new_session_builder()
-                .ok()
-                .and_then(|b| {
-                    b.with_optimization_level(GraphOptimizationLevel::Basic)
-                        .ok()
-                })
-                .and_then(|b| b.with_model_from_file(scene_model_path).ok())
-        });
+        let scene_session = ORT_ENV
+            .as_ref()
+            .copied()
+            .and_then(|env| safe_session(env, scene_model_path, "scene"));
 
-        let detection_session = ORT_ENV.as_ref().and_then(|env| {
-            env.new_session_builder()
-                .ok()
-                .and_then(|b| {
-                    b.with_optimization_level(GraphOptimizationLevel::Basic)
-                        .ok()
-                })
-                .and_then(|b| b.with_model_from_file(detection_model_path).ok())
-        });
+        let detection_session = ORT_ENV
+            .as_ref()
+            .copied()
+            .and_then(|env| safe_session(env, detection_model_path, "detection"));
         if scene_session.is_some() {
             log::info!("Loaded scene model: {}", scene_path.display());
         } else {
@@ -83,24 +76,32 @@ impl TaggingEngine {
             log::warn!("Failed to load detection model: {}", detect_path.display());
         }
 
+        let onnx_enabled = scene_session.is_some() || detection_session.is_some();
         Ok(Self {
             scene_session,
             detection_session,
             config,
-            onnx_enabled: true,
+            onnx_enabled,
         })
+    }
+
+    pub fn disable_onnx(&mut self) {
+        self.scene_session = None;
+        self.detection_session = None;
+        self.onnx_enabled = false;
+        log::warn!("ONNX disabled after runtime failure; continuing with heuristics only.");
     }
 
     pub fn classify(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<TaggingResult> {
         let mut tags: HashMap<String, f32> = HashMap::new();
-        let scene_probs = match self.run_scene(preview_path) {
+        let scene_probs = match safe_run(|| self.run_scene(preview_path)) {
             Ok(map) => map,
             Err(err) => {
                 log::warn!("Scene model failed for {}: {}", preview_path.display(), err);
                 HashMap::new()
             }
         };
-        let portrait_score = match self.run_portrait(preview_path, exif) {
+        let portrait_score = match safe_run(|| self.run_portrait(preview_path, exif)) {
             Ok(score) => score,
             Err(err) => {
                 log::warn!(
@@ -355,6 +356,41 @@ fn rgb8_to_nchw(img: &image::RgbImage, w: u32, h: u32) -> Vec<f32> {
         input[idx + plane * 2] = pixel[2] as f32 / 255.0;
     }
     input
+}
+
+fn safe_session(
+    env: &'static Environment,
+    model_path: &'static Path,
+    label: &str,
+) -> Option<Session<'static>> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        env.new_session_builder()
+            .ok()
+            .and_then(|b| {
+                b.with_optimization_level(GraphOptimizationLevel::Basic)
+                    .ok()
+            })
+            .and_then(|b| b.with_model_from_file(model_path).ok())
+    })) {
+        Ok(session) => session,
+        Err(_) => {
+            log::warn!(
+                "ONNX session panicked while loading {label} model: {}",
+                model_path.display()
+            );
+            None
+        }
+    }
+}
+
+fn safe_run<T, F>(f: F) -> std::result::Result<T, String>
+where
+    F: FnOnce() -> std::result::Result<T, Error>,
+{
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(res) => res.map_err(|e| format!("{e}")),
+        Err(_) => Err("ONNX runtime panic".into()),
+    }
 }
 
 #[cfg(test)]

@@ -2,10 +2,11 @@ use crate::config::{AppPaths, TaggingConfig};
 use crate::db::{self, DbPool};
 use crate::error::Result;
 use crate::exiftool;
-use crate::models::{ImportProgressEvent, PhotoRecord};
+use crate::models::{ImportProgressEvent, PhotoRecord, TaggingResult};
 use crate::tagging::TaggingEngine;
 use crate::thumbnails;
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 use uuid::Uuid;
@@ -155,7 +156,17 @@ fn process_file(
     let photo_id = db::upsert_photo(&conn, &photo)?;
     photo.id = Some(photo_id);
 
-    let tagging = engine.classify(&preview_output, &exif).unwrap_or_default();
+    let tagging = match catch_unwind(AssertUnwindSafe(|| engine.classify(&preview_output, &exif))) {
+        Ok(res) => res.unwrap_or_default(),
+        Err(_) => {
+            log::warn!(
+                "ONNX runtime panicked while tagging {}; disabling ONNX for this run",
+                path.display()
+            );
+            engine.disable_onnx();
+            TaggingResult::default()
+        }
+    };
     db::replace_auto_tags(&conn, photo_id, tagging, &exif)?;
 
     Ok(())
