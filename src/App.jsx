@@ -71,7 +71,7 @@ function RatingStars({ value, onChange, compact, showClear = false }) {
           <StarIcon filled={value >= n} />
         </button>
       ))}
-      {showClear && (
+      {showClear && value > 0 && (
         <button className="clear" onClick={() => onChange(null)}>
           Clear
         </button>
@@ -116,11 +116,12 @@ function TagList({ tags, onRemove }) {
   );
 }
 
-function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize }) {
+function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, variant }) {
   const sizingStyle = thumbSize ? { "--thumb-size": `${thumbSize}px` } : {};
+  const isFilmstrip = variant === "filmstrip";
   return (
     <div
-      className={`thumb ${selected ? "selected" : ""}`}
+      className={`thumb ${isFilmstrip ? "filmstrip" : ""} ${selected ? "selected" : ""}`}
       onClick={onSelect}
       onDoubleClick={onDoubleClick}
       style={sizingStyle}
@@ -130,16 +131,22 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize }) {
       ) : (
         <div className="thumb-placeholder">No preview</div>
       )}
-      <div className="thumb-caption">
-        <div className="filename" title={photo.file_name}>
+      {isFilmstrip ? (
+        <div className="thumb-overlay" title={photo.file_name}>
           {photo.file_name}
         </div>
-        <div className="meta-row">
-          {photo.rating ? <span className="pill rating-pill">R{photo.rating}</span> : null}
-          {photo.picked ? <span className="pill pick">Pick</span> : null}
-          {photo.rejected ? <span className="pill reject">Reject</span> : null}
+      ) : (
+        <div className="thumb-caption">
+          <div className="filename" title={photo.file_name}>
+            {photo.file_name}
+          </div>
+          <div className="meta-row">
+            {photo.rating ? <span className="pill rating-pill">R{photo.rating}</span> : null}
+            {photo.picked ? <span className="pill pick">Pick</span> : null}
+            {photo.rejected ? <span className="pill reject">Reject</span> : null}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -655,7 +662,7 @@ export default function App() {
                       value={activePhoto?.photo.rating || 0}
                       onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
                       compact
-                      showClear
+                      showClear={(activePhoto?.photo.rating || 0) > 0}
                     />
                     <div className="preview-chips">
                       {activePhoto?.photo.picked && <span className="preview-chip">Picked</span>}
@@ -731,7 +738,7 @@ export default function App() {
                       selected={selection.includes(p.photo.id)}
                       onSelect={(e) => onSelectPhoto(p.photo.id, idx, e)}
                       onDoubleClick={() => setSelection([p.photo.id])}
-                      thumbSize={120}
+                      variant="filmstrip"
                     />
                   ))}
                 </div>
@@ -780,19 +787,8 @@ export default function App() {
                     <RatingStars
                       value={activePhoto.photo.rating || 0}
                       onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
-                      showClear
+                      showClear={(activePhoto?.photo.rating || 0) > 0}
                     />
-                    <div className="rating-actions">
-                      <button className={activePhoto.photo.picked ? "active" : ""} onClick={togglePick}>
-                        Pick
-                      </button>
-                      <button className={activePhoto.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
-                        Reject
-                      </button>
-                      <button className="clear-rating" onClick={() => applyCullChange({ rating: null, label: "Rating cleared" })}>
-                        Clear rating
-                      </button>
-                    </div>
                   </div>
                 </div>
               )}
