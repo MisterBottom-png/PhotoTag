@@ -782,11 +782,11 @@ const MAX_SCENE_TAGS: usize = 5;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const SCENE_GROUP_TOPK: usize = 10;
-const SCENE_GROUP_MIN_LABELS: usize = 2;
-const SCENE_UNRELATED_PENALTY: f32 = 0.6;
-const DETECTION_MIN_SCORE: f32 = 0.25;
+const SCENE_GROUP_MIN_LABELS: usize = 3;
+const SCENE_UNRELATED_PENALTY: f32 = 0.5;
+const DETECTION_MIN_SCORE: f32 = 0.30;
 const DETECTION_PAIR_FOREGROUND_INDEX: usize = 1;
-const DETECTION_TAG_BOOST: f32 = 0.30;
+const DETECTION_TAG_BOOST: f32 = 0.20;
 const DETECTION_REQUIRED_TAGS: &[&str] = &[
     "amphibian",
     "bird",
