@@ -105,7 +105,15 @@ impl AppPaths {
     }
 
     pub fn resolve_bin(&self, name: &str) -> PathBuf {
-        self.bin_dir.join(name)
+        let primary = self.bin_dir.join(name);
+        if primary.exists() {
+            return primary;
+        }
+        let dev_fallback = Path::new(env!("CARGO_MANIFEST_DIR")).join("bin").join(name);
+        if dev_fallback.exists() {
+            return dev_fallback;
+        }
+        primary
     }
 
     pub fn resolve_model(&self, name: &Path) -> PathBuf {
