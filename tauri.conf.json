@@ -1,0 +1,29 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:1420",
+    "distDir": "dist"
+  },
+  "package": {
+    "productName": "PhotoTag",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "PhotoTag",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 720
+      }
+    ],
+    "bundle": {
+      "active": false
+    },
+    "security": {
+      "csp": null
+    }
+  }
+}
