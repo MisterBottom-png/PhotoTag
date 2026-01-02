@@ -12,23 +12,24 @@ mod schema;
 mod tagging;
 mod thumbnails;
 
-use crate::config::{AppPaths, TaggingConfig};
+use crate::config::{AppPaths, InferenceDevicePreference, TaggingConfig};
 use crate::db::DbPool;
 use crate::error::Error;
 use crate::jobs::JobManager;
-use crate::models::{PhotoWithTags, QueryFilters, SmartViewCounts};
+use crate::models::{InferenceStatus, PhotoWithTags, QueryFilters, SmartViewCounts};
 use crate::tagging::TaggingEngine;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 type InvokeResult<T> = std::result::Result<T, String>;
 
 pub struct AppState {
     db: DbPool,
     paths: AppPaths,
-    tagging: TaggingConfig,
+    tagging: Arc<Mutex<TaggingConfig>>,
     jobs: JobManager,
 }
 
@@ -83,12 +84,12 @@ fn remove_manual_tag(
 }
 
 #[tauri::command]
-fn rerun_auto(state: tauri::State<AppState>, photo_id: i64) -> InvokeResult<()> {
+async fn rerun_auto(state: tauri::State<'_, AppState>, photo_id: i64) -> InvokeResult<()> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     let photo = db::get_photo(&conn, photo_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| Error::Init("Photo not found".into()).to_string())?;
-    let mut engine = TaggingEngine::new(state.tagging.clone()).map_err(|e| e.to_string())?;
+    let preview = photo.photo.preview_path.clone();
     let exif = crate::models::ExifMetadata {
         make: photo.photo.make.clone(),
         model: photo.photo.model.clone(),
@@ -105,7 +106,15 @@ fn rerun_auto(state: tauri::State<AppState>, photo_id: i64) -> InvokeResult<()> 
         width: photo.photo.width,
         height: photo.photo.height,
     };
-    if let Some(preview) = &photo.photo.preview_path {
+    let config = state.tagging.lock().unwrap().clone();
+    let pool = state.db.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> InvokeResult<()> {
+        let mut engine = TaggingEngine::new(config).map_err(|e| e.to_string())?;
+        let Some(preview) = preview.as_ref() else {
+            return Ok(());
+        };
+        let conn = pool.get().map_err(|e| e.to_string())?;
         match catch_unwind(AssertUnwindSafe(|| {
             engine.classify(std::path::Path::new(preview), &exif)
         })) {
@@ -123,7 +132,103 @@ fn rerun_auto(state: tauri::State<AppState>, photo_id: i64) -> InvokeResult<()> 
                 );
             }
         }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn get_inference_status(state: tauri::State<AppState>) -> InvokeResult<InferenceStatus> {
+    let config = state.tagging.lock().unwrap().clone();
+    Ok(tagging::inference_status(&config))
+}
+
+#[tauri::command]
+fn set_inference_device(
+    state: tauri::State<AppState>,
+    device: InferenceDevicePreference,
+) -> InvokeResult<InferenceStatus> {
+    {
+        let mut config = state.tagging.lock().unwrap();
+        config.inference_device = device;
     }
+    tagging::clear_session_cache();
+    let config = state.tagging.lock().unwrap().clone();
+    Ok(tagging::inference_status(&config))
+}
+
+#[tauri::command]
+fn test_inference(
+    state: tauri::State<AppState>,
+    count: Option<u32>,
+) -> InvokeResult<()> {
+    if !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let limit = count.unwrap_or(12).clamp(1, 200);
+    let config = state.tagging.lock().unwrap().clone();
+    let pool = state.db.clone();
+    std::thread::spawn(move || {
+        let conn = match pool.get() {
+            Ok(conn) => conn,
+            Err(err) => {
+                log::warn!("Test inference: failed to get DB connection: {err}");
+                return;
+            }
+        };
+        let mut filters = QueryFilters::default();
+        filters.limit = Some(limit as i64);
+        let photos = match db::query_photos(&conn, filters) {
+            Ok(photos) => photos,
+            Err(err) => {
+                log::warn!("Test inference: query failed: {err}");
+                return;
+            }
+        };
+        let mut engine = match TaggingEngine::new(config) {
+            Ok(engine) => engine,
+            Err(err) => {
+                log::warn!("Test inference: tagging engine init failed: {err}");
+                return;
+            }
+        };
+        let mut processed = 0usize;
+        for photo in photos {
+            let Some(preview) = photo.photo.preview_path.as_deref() else {
+                continue;
+            };
+            let exif = crate::models::ExifMetadata {
+                make: photo.photo.make.clone(),
+                model: photo.photo.model.clone(),
+                lens: photo.photo.lens.clone(),
+                body_serial: None,
+                datetime_original: photo.photo.date_taken,
+                iso: photo.photo.iso,
+                fnumber: photo.photo.fnumber,
+                focal_length: photo.photo.focal_length,
+                exposure_time: photo.photo.exposure_time,
+                exposure_comp: photo.photo.exposure_comp,
+                gps_lat: photo.photo.gps_lat,
+                gps_lng: photo.photo.gps_lng,
+                width: photo.photo.width,
+                height: photo.photo.height,
+            };
+            let start = std::time::Instant::now();
+            let _ = engine.classify(std::path::Path::new(preview), &exif);
+            let total = start.elapsed();
+            log::info!(
+                "Test inference: {} in {}ms",
+                preview,
+                total.as_millis()
+            );
+            processed += 1;
+            if processed >= limit as usize {
+                break;
+            }
+        }
+        log::info!("Test inference complete: {processed} image(s)");
+    });
     Ok(())
 }
 
@@ -212,7 +317,7 @@ async fn import_folder(
             std::path::PathBuf::from(path),
             state.db.clone(),
             state.paths.clone(),
-            state.tagging.clone(),
+            state.tagging.lock().unwrap().clone(),
         )
         .map_err(|e| e.to_string())
 }
@@ -282,7 +387,7 @@ fn main() {
         .manage(AppState {
             db: db_pool,
             paths,
-            tagging,
+            tagging: Arc::new(Mutex::new(tagging)),
             jobs: JobManager::default(),
         })
         .setup(|_app| Ok(()))
@@ -305,7 +410,10 @@ fn main() {
             batch_update_cull,
             get_smart_views_counts,
             find_duplicates,
-            find_similar
+            find_similar,
+            get_inference_status,
+            set_inference_device,
+            test_inference
         ])
         .run(context)
         .expect("error while running tauri application");

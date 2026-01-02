@@ -172,3 +172,18 @@ pub struct SmartViewCounts {
     pub last_import: i64,
     pub all: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceModelStatus {
+    pub label: String,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceStatus {
+    pub preference: String,
+    pub provider: String,
+    pub warning: Option<String>,
+    pub runtime_version: Option<String>,
+    pub models: Vec<InferenceModelStatus>,
+}

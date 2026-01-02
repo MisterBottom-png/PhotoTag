@@ -1569,3 +1569,43 @@ select {
     padding: 10px 26px;
   }
 }
+
+.settings-panel {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-row select {
+  min-width: 200px;
+}
+
+.settings-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+.settings-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.settings-model {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}

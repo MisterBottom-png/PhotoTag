@@ -13,6 +13,12 @@ const SORT_OPTIONS = [
   { value: "file_name", label: "Filename" },
 ];
 
+const INFERENCE_DEVICE_OPTIONS = [
+  { value: "auto", label: "Auto (GPU if available)" },
+  { value: "gpu", label: "GPU (DirectML)" },
+  { value: "cpu", label: "CPU" },
+];
+
 const DEFAULT_FILTERS = { search: "", tags: [], sort_by: "date_taken", sort_dir: "DESC" };
 
 function usePersistentState(key, defaultValue) {
@@ -350,6 +356,7 @@ function EmptyState({ onImport, onClearFilters }) {
 export default function App() {
   const [mode, setMode] = usePersistentState("pt-mode", "CULL");
   const [theme, setTheme] = usePersistentState("pt-theme", "dark");
+  const [inferenceDevice, setInferenceDevice] = usePersistentState("pt-inference-device", "auto");
   const [smartView, setSmartView] = useState("ALL");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [thumbSize, setThumbSize] = usePersistentState("pt-thumb-size", 190);
@@ -373,6 +380,8 @@ export default function App() {
   const [rerunLoading, setRerunLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState(null);
+  const [inferenceStatus, setInferenceStatus] = useState(null);
+  const [inferenceBusy, setInferenceBusy] = useState(false);
   const [zoomMode, setZoomMode] = usePersistentState("pt-zoom-mode", "FIT");
   const [fullscreen, setFullscreen] = useState(false);
   const [imageReady, setImageReady] = useState(false);
@@ -408,6 +417,35 @@ export default function App() {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    invoke("get_inference_status")
+      .then((status) => setInferenceStatus(status))
+      .catch(() => null);
+  }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    setInferenceBusy(true);
+    invoke("set_inference_device", { device: inferenceDevice })
+      .then((status) => {
+        if (canceled) return;
+        setInferenceStatus(status);
+        if (status?.warning) {
+          setToast({ message: status.warning, canUndo: false });
+        }
+      })
+      .catch((err) => {
+        if (canceled) return;
+        setErrorMessage(`Inference device update failed: ${err}`);
+      })
+      .finally(() => {
+        if (!canceled) setInferenceBusy(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [inferenceDevice]);
 
   useEffect(() => {
     setImageReady(false);
@@ -694,6 +732,15 @@ export default function App() {
       if (!pickedDir) {
         setImporting(false);
       }
+    }
+  };
+
+  const handleTestInference = async () => {
+    try {
+      await invoke("test_inference", { count: 24 });
+      setToast({ message: "Inference test started (see dev logs)", canUndo: false });
+    } catch (err) {
+      setErrorMessage(`Test inference failed: ${err}`);
     }
   };
 
@@ -1332,6 +1379,48 @@ export default function App() {
                   onToggle={mode === "CULL" ? () => setShowAllTags((v) => !v) : null}
                 />
               </div>
+              <div className="settings-panel">
+                <div className="section-head">
+                  <h4>Inference</h4>
+                  {import.meta.env.DEV && (
+                    <button className="ghost small" onClick={handleTestInference} disabled={inferenceBusy}>
+                      {inferenceBusy ? "Updating..." : "Test Inference"}
+                    </button>
+                  )}
+                </div>
+                <label className="settings-row">
+                  <span>Device</span>
+                  <select
+                    value={inferenceDevice}
+                    onChange={(e) => setInferenceDevice(e.target.value)}
+                    disabled={inferenceBusy}
+                  >
+                    {INFERENCE_DEVICE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="settings-meta">
+                  <span>
+                    <strong>Active:</strong> {inferenceStatus?.provider || "Unknown"}
+                  </span>
+                  {inferenceStatus?.runtime_version && (
+                    <span className="muted">ORT {inferenceStatus.runtime_version}</span>
+                  )}
+                </div>
+                {inferenceStatus?.models?.length > 0 && (
+                  <div className="settings-models">
+                    {inferenceStatus.models.map((model) => (
+                      <div key={model.label} className="settings-model">
+                        <span className="muted">{model.label}</span>
+                        <span>{model.provider}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               {similarOpen && (
                 <div className="similar-panel">
                   <div className="section-head">
@@ -1372,7 +1461,51 @@ export default function App() {
               </div>
             </>
           ) : (
-            <div className="muted">Select a photo to see details</div>
+            <>
+              <div className="muted">Select a photo to see details</div>
+              <div className="settings-panel">
+                <div className="section-head">
+                  <h4>Inference</h4>
+                  {import.meta.env.DEV && (
+                    <button className="ghost small" onClick={handleTestInference} disabled={inferenceBusy}>
+                      {inferenceBusy ? "Updating..." : "Test Inference"}
+                    </button>
+                  )}
+                </div>
+                <label className="settings-row">
+                  <span>Device</span>
+                  <select
+                    value={inferenceDevice}
+                    onChange={(e) => setInferenceDevice(e.target.value)}
+                    disabled={inferenceBusy}
+                  >
+                    {INFERENCE_DEVICE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="settings-meta">
+                  <span>
+                    <strong>Active:</strong> {inferenceStatus?.provider || "Unknown"}
+                  </span>
+                  {inferenceStatus?.runtime_version && (
+                    <span className="muted">ORT {inferenceStatus.runtime_version}</span>
+                  )}
+                </div>
+                {inferenceStatus?.models?.length > 0 && (
+                  <div className="settings-models">
+                    {inferenceStatus.models.map((model) => (
+                      <div key={model.label} className="settings-model">
+                        <span className="muted">{model.label}</span>
+                        <span>{model.provider}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </aside>
       </div>

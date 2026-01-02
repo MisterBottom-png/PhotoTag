@@ -124,6 +124,40 @@ impl<'a> SessionBuilder<'a> {
         Ok(self)
     }
 
+    /// Disable the memory pattern optimizations (recommended for DirectML).
+    pub fn with_disable_mem_pattern(self) -> Result<SessionBuilder<'a>> {
+        let status = unsafe { g_ort().DisableMemPattern.unwrap()(self.session_options_ptr) };
+        status_to_result(status).map_err(OrtError::SessionOptions)?;
+        Ok(self)
+    }
+
+    /// Force sequential execution (recommended for DirectML).
+    pub fn with_execution_mode_sequential(self) -> Result<SessionBuilder<'a>> {
+        let status = unsafe {
+            g_ort().SetSessionExecutionMode.unwrap()(
+                self.session_options_ptr,
+                sys::ExecutionMode::ORT_SEQUENTIAL,
+            )
+        };
+        status_to_result(status).map_err(OrtError::SessionOptions)?;
+        Ok(self)
+    }
+
+    /// Attempt to append the DirectML execution provider (Windows only).
+    #[cfg(target_os = "windows")]
+    pub fn with_directml(self, device_id: i32) -> Result<SessionBuilder<'a>> {
+        append_directml_provider(self.session_options_ptr, device_id)?;
+        Ok(self)
+    }
+
+    /// Non-Windows stub to keep call sites portable.
+    #[cfg(not(target_os = "windows"))]
+    pub fn with_directml(self, _device_id: i32) -> Result<SessionBuilder<'a>> {
+        Err(OrtError::SessionOptions(crate::error::OrtApiError::Msg(
+            "DirectML execution provider is only supported on Windows".to_string(),
+        )))
+    }
+
     /// Set the session's allocator
     ///
     /// Defaults to [`AllocatorType::Arena`](../enum.AllocatorType.html#variant.Arena)
@@ -285,6 +319,66 @@ impl<'a> SessionBuilder<'a> {
             outputs,
         })
     }
+}
+
+#[cfg(target_os = "windows")]
+fn append_directml_provider(
+    options: *mut sys::OrtSessionOptions,
+    device_id: i32,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(lpModuleName: *const u16) -> *mut std::ffi::c_void;
+        fn LoadLibraryW(lpLibFileName: *const u16) -> *mut std::ffi::c_void;
+        fn GetProcAddress(
+            hModule: *mut std::ffi::c_void,
+            lpProcName: *const i8,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    unsafe fn get_module_handle(name: &str) -> *mut std::ffi::c_void {
+        let wide: Vec<u16> = std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = GetModuleHandleW(wide.as_ptr());
+        if handle.is_null() {
+            LoadLibraryW(wide.as_ptr())
+        } else {
+            handle
+        }
+    }
+
+    type DmlAppendFn =
+        unsafe extern "system" fn(*mut sys::OrtSessionOptions, i32) -> *mut sys::OrtStatus;
+
+    let symbol = CString::new("OrtSessionOptionsAppendExecutionProvider_DML").unwrap();
+    let mut last_err: Option<String> = None;
+    for module_name in ["onnxruntime.dll", "onnxruntime_providers_shared.dll"] {
+        let module = unsafe { get_module_handle(module_name) };
+        if module.is_null() {
+            last_err = Some(format!("Failed to load {}", module_name));
+            continue;
+        }
+        let proc = unsafe { GetProcAddress(module, symbol.as_ptr()) };
+        if proc.is_null() {
+            last_err = Some(format!(
+                "DirectML symbol not found in {}",
+                module_name
+            ));
+            continue;
+        }
+        let func: DmlAppendFn = unsafe { std::mem::transmute(proc) };
+        let status = unsafe { func(options, device_id) };
+        return status_to_result(status).map_err(OrtError::SessionOptions);
+    }
+
+    Err(OrtError::SessionOptions(crate::error::OrtApiError::Msg(
+        last_err.unwrap_or_else(|| "DirectML provider load failed".to_string()),
+    )))
 }
 
 /// Type storing the session information, built from an [`Environment`](environment/struct.Environment.html)

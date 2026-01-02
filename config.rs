@@ -3,6 +3,30 @@ use std::path::{Path, PathBuf};
 use tauri::api::path::{app_data_dir, resource_dir};
 use tauri::{Config, Env, PackageInfo};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceDevicePreference {
+    Auto,
+    Gpu,
+    Cpu,
+}
+
+impl Default for InferenceDevicePreference {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl InferenceDevicePreference {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (GPU if available)",
+            Self::Gpu => "GPU (DirectML)",
+            Self::Cpu => "CPU",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaggingConfig {
     pub scene_model_path: PathBuf,
@@ -16,6 +40,8 @@ pub struct TaggingConfig {
     pub detection_confidence_threshold: f32,
     #[serde(default = "default_detection_iou_threshold")]
     pub detection_iou_threshold: f32,
+    #[serde(default)]
+    pub inference_device: InferenceDevicePreference,
 }
 
 impl Default for TaggingConfig {
@@ -30,6 +56,7 @@ impl Default for TaggingConfig {
             face_min_score: 0.75,
             detection_confidence_threshold: 0.25,
             detection_iou_threshold: 0.45,
+            inference_device: InferenceDevicePreference::Auto,
         }
     }
 }

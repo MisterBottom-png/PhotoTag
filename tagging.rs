@@ -1,6 +1,6 @@
-use crate::config::TaggingConfig;
+use crate::config::{InferenceDevicePreference, TaggingConfig};
 use crate::error::{Error, Result};
-use crate::models::{ExifMetadata, TaggingResult};
+use crate::models::{ExifMetadata, InferenceModelStatus, InferenceStatus, TaggingResult};
 use image::imageops::FilterType;
 use lazy_static::lazy_static;
 use onnxruntime::{
@@ -12,8 +12,11 @@ use onnxruntime::{
 };
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::CStr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 lazy_static! {
     static ref ORT_ENV: Option<&'static Environment> = Environment::builder()
@@ -23,18 +26,106 @@ lazy_static! {
         .ok()
         .map(|env| Box::leak(Box::new(env)))
         .map(|env_ref| env_ref as &'static Environment);
+    static ref SESSION_CACHE: Mutex<HashMap<SessionCacheKey, Arc<SessionHandle>>> =
+        Mutex::new(HashMap::new());
+    static ref INFERENCE_WARNING: Mutex<Option<String>> = Mutex::new(None);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceProvider {
+    Cpu,
+    DirectML,
+}
+
+impl InferenceProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::DirectML => "GPU (DirectML)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SessionCacheKey {
+    model_path: String,
+    preference: InferenceDevicePreference,
+}
+
+struct SessionHandle {
+    session: Mutex<Session<'static>>,
+    provider: InferenceProvider,
+    label: &'static str,
+    model_path: &'static Path,
+}
+
+#[derive(Default, Clone)]
+struct TimingStats {
+    samples: usize,
+    decode_preprocess_total: Duration,
+    inference_total: Duration,
+}
+
+impl TimingStats {
+    fn record(&mut self, decode_preprocess: Duration, inference: Duration) {
+        self.samples = self.samples.saturating_add(1);
+        self.decode_preprocess_total += decode_preprocess;
+        self.inference_total += inference;
+    }
+
+    fn summary(&self) -> String {
+        if self.samples == 0 {
+            return "no samples".to_string();
+        }
+        let samples = self.samples as u32;
+        let dp_ms = self.decode_preprocess_total.as_millis() as f64 / samples as f64;
+        let inf_ms = self.inference_total.as_millis() as f64 / samples as f64;
+        format!("avg decode+preprocess={dp_ms:.1}ms, avg inference={inf_ms:.1}ms")
+    }
+}
+
+fn ort_runtime_version() -> Option<String> {
+    unsafe {
+        let api_base = onnxruntime_sys::OrtGetApiBase();
+        if api_base.is_null() {
+            return None;
+        }
+        let get_version = (*api_base).GetVersionString?;
+        let raw = get_version();
+        if raw.is_null() {
+            return None;
+        }
+        CStr::from_ptr(raw).to_str().ok().map(|s| s.to_string())
+    }
+}
+
+fn log_runtime_diagnostics_once() {
+    static LOGGED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(version) = ort_runtime_version() {
+        log::info!("ONNX Runtime version: {}", version);
+    } else {
+        log::warn!("Unable to determine ONNX Runtime version");
+    }
 }
 
 pub struct TaggingEngine {
-    scene_session: Option<Session<'static>>,
-    detection_session: Option<Session<'static>>,
-    face_session: Option<Session<'static>>,
+    scene_session: Option<Arc<SessionHandle>>,
+    detection_session: Option<Arc<SessionHandle>>,
+    face_session: Option<Arc<SessionHandle>>,
     config: TaggingConfig,
     onnx_enabled: bool,
     scene_labels: Vec<String>,
     scene_label_map: HashMap<String, Vec<String>>,
     detection_labels: Vec<String>,
     detection_label_map: HashMap<String, Vec<String>>,
+    scene_input: Vec<f32>,
+    detection_input: Vec<f32>,
+    face_input: Vec<f32>,
+    timings: HashMap<&'static str, TimingStats>,
 }
 
 impl TaggingEngine {
@@ -61,6 +152,10 @@ impl TaggingEngine {
                 scene_label_map: HashMap::new(),
                 detection_labels: Vec::new(),
                 detection_label_map: HashMap::new(),
+                scene_input: Vec::new(),
+                detection_input: Vec::new(),
+                face_input: Vec::new(),
+                timings: HashMap::new(),
             });
         }
 
@@ -77,12 +172,6 @@ impl TaggingEngine {
             log::warn!("Face model not found: {}", face_path.display());
         }
 
-        let scene_model_path: &'static Path =
-            Box::leak(config.scene_model_path.clone().into_boxed_path());
-        let detection_model_path: &'static Path =
-            Box::leak(config.detection_model_path.clone().into_boxed_path());
-        let face_model_path: &'static Path =
-            Box::leak(config.face_model_path.clone().into_boxed_path());
         let scene_labels = load_labels_from_model(&scene_path);
         let scene_label_map = load_label_map(&scene_path);
         let detection_labels = load_labels_from_model(&detect_path);
@@ -100,19 +189,17 @@ impl TaggingEngine {
             }
         }
 
-        let scene_session = ORT_ENV
-            .as_ref()
-            .copied()
-            .and_then(|env| safe_session(env, scene_model_path, "scene"));
+        let preference = config.inference_device;
+        let scene_session = ORT_ENV.as_ref().copied().and_then(|env| {
+            get_or_create_session(env, scene_path.as_path(), "scene", preference, 224, 224)
+        });
 
-        let detection_session = ORT_ENV
-            .as_ref()
-            .copied()
-            .and_then(|env| safe_session(env, detection_model_path, "detection"));
-        let face_session = ORT_ENV
-            .as_ref()
-            .copied()
-            .and_then(|env| safe_session(env, face_model_path, "face"));
+        let detection_session = ORT_ENV.as_ref().copied().and_then(|env| {
+            get_or_create_session(env, detect_path.as_path(), "detection", preference, 640, 640)
+        });
+        let face_session = ORT_ENV.as_ref().copied().and_then(|env| {
+            get_or_create_session(env, face_path.as_path(), "face", preference, 224, 224)
+        });
         if scene_session.is_some() {
             log::info!("Loaded scene model: {}", scene_path.display());
         } else {
@@ -141,6 +228,10 @@ impl TaggingEngine {
             scene_label_map,
             detection_labels,
             detection_label_map,
+            scene_input: Vec::new(),
+            detection_input: Vec::new(),
+            face_input: Vec::new(),
+            timings: HashMap::new(),
         })
     }
 
@@ -221,21 +312,65 @@ impl TaggingEngine {
         Ok(TaggingResult { tags })
     }
 
+    fn record_timing(
+        &mut self,
+        label: &'static str,
+        decode_preprocess: Duration,
+        inference: Duration,
+        provider: InferenceProvider,
+        preview_path: &Path,
+    ) {
+        let entry = self.timings.entry(label).or_default();
+        entry.record(decode_preprocess, inference);
+        log::info!(
+            "{label} timing for {}: decode+preprocess={}ms, inference={}ms, provider={} ({})",
+            preview_path.display(),
+            decode_preprocess.as_millis(),
+            inference.as_millis(),
+            provider.label(),
+            entry.summary()
+        );
+    }
+
     fn run_scene(&mut self, preview_path: &Path) -> Result<HashMap<String, f32>> {
         if self.scene_session.is_none() {
             return Ok(HashMap::new());
         }
 
-        let session = self.scene_session.as_mut().unwrap();
-        let (w, h) = model_input_hw(session, 224, 224);
+        let session_handle = self.scene_session.as_ref().unwrap().clone();
+        let (w, h, nchw) = {
+            let session = session_handle.session.lock().unwrap();
+            let (w, h) = model_input_hw(&session, 224, 224);
+            (w, h, model_expects_nchw(&session))
+        };
+        let decode_start = Instant::now();
         let img = image::open(preview_path)?;
         let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb32f();
-        let nchw = model_expects_nchw(session);
+        let mut decode_preprocess = decode_start.elapsed();
         let mut best_mode = ScenePreprocess::Imagenet;
-        let mut logits = run_scene_logits(session, &resized, nchw, w, h, best_mode)?;
+        let (mut logits, prep_time, mut inference_total) = run_scene_logits(
+            &session_handle,
+            &resized,
+            nchw,
+            w,
+            h,
+            best_mode,
+            &mut self.scene_input,
+        )?;
+        decode_preprocess += prep_time;
         let mut best_top1 = top1_prob(&logits);
         for mode in [ScenePreprocess::Raw01, ScenePreprocess::TfMinus1] {
-            let candidate = run_scene_logits(session, &resized, nchw, w, h, mode)?;
+            let (candidate, prep_time, infer_time) = run_scene_logits(
+                &session_handle,
+                &resized,
+                nchw,
+                w,
+                h,
+                mode,
+                &mut self.scene_input,
+            )?;
+            decode_preprocess += prep_time;
+            inference_total += infer_time;
             let top1 = top1_prob(&candidate);
             if top1 > best_top1 {
                 best_top1 = top1;
@@ -371,6 +506,15 @@ impl TaggingEngine {
                 map.insert("nature".into(), probs.get(2).copied().unwrap_or(0.0));
             }
         }
+        if cfg!(debug_assertions) {
+            self.record_timing(
+                "scene",
+                decode_preprocess,
+                inference_total,
+                session_handle.provider,
+                preview_path,
+            );
+        }
         Ok(map)
     }
 
@@ -391,19 +535,25 @@ impl TaggingEngine {
         if self.detection_session.is_none() {
             return Ok(HashMap::new());
         }
-        let session = self.detection_session.as_mut().unwrap();
-        let (w, h) = model_input_hw(session, 640, 640);
+        let session_handle = self.detection_session.as_ref().unwrap().clone();
+        let (w, h, nchw) = {
+            let session = session_handle.session.lock().unwrap();
+            let (w, h) = model_input_hw(&session, 640, 640);
+            (w, h, model_expects_nchw(&session))
+        };
+        let decode_start = Instant::now();
         let img = image::open(preview_path)?;
         let rgb = img.to_rgb8();
         let orig_w = rgb.width();
         let orig_h = rgb.height();
         // YOLOv5 expects letterboxed input; keep scale/padding to recover boxes.
         let (letterboxed, ratio, dw, dh) = letterbox_rgb(&rgb, w, h, 114);
-        let nchw = model_expects_nchw(session);
         let input = if nchw {
-            rgb8_to_nchw(&letterboxed, w, h)
+            rgb8_to_nchw_into(&letterboxed, w, h, &mut self.detection_input);
+            self.detection_input.clone()
         } else {
-            rgb8_to_nhwc(&letterboxed)
+            rgb8_to_nhwc_into(&letterboxed, &mut self.detection_input);
+            self.detection_input.clone()
         };
         let input_tensor = if nchw {
             Array::from_shape_vec((1, 3, h as usize, w as usize), input)
@@ -411,9 +561,15 @@ impl TaggingEngine {
             Array::from_shape_vec((1, h as usize, w as usize, 3), input)
         }
         .map_err(|e| Error::Init(format!("Invalid detection tensor shape: {e}")))?;
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .run(vec![input_tensor])
-            .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?;
+        let decode_preprocess = decode_start.elapsed();
+        let infer_start = Instant::now();
+        let outputs: Vec<OrtOwnedTensor<f32, _>> = {
+            let mut session = session_handle.session.lock().unwrap();
+            session
+                .run(vec![input_tensor])
+                .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?
+        };
+        let inference_time = infer_start.elapsed();
         if !outputs.is_empty() {
             let shapes = outputs
                 .iter()
@@ -457,6 +613,15 @@ impl TaggingEngine {
                 if score > *entry {
                     *entry = score;
                 }
+            }
+            if cfg!(debug_assertions) {
+                self.record_timing(
+                    "detection",
+                    decode_preprocess,
+                    inference_time,
+                    session_handle.provider,
+                    preview_path,
+                );
             }
             return Ok(tags);
         }
@@ -508,6 +673,15 @@ impl TaggingEngine {
                     }
                 }
             }
+            if cfg!(debug_assertions) {
+                self.record_timing(
+                    "detection",
+                    decode_preprocess,
+                    inference_time,
+                    session_handle.provider,
+                    preview_path,
+                );
+            }
             return Ok(tags);
         }
         let class_scores = detection_class_scores(&outputs);
@@ -546,6 +720,15 @@ impl TaggingEngine {
                 }
             }
         }
+        if cfg!(debug_assertions) {
+            self.record_timing(
+                "detection",
+                decode_preprocess,
+                inference_time,
+                session_handle.provider,
+                preview_path,
+            );
+        }
         Ok(tags)
     }
 
@@ -553,15 +736,21 @@ impl TaggingEngine {
         if self.face_session.is_none() {
             return Ok(0.0);
         }
-        let session = self.face_session.as_mut().unwrap();
-        let (w, h) = model_input_hw(session, 224, 224);
+        let session_handle = self.face_session.as_ref().unwrap().clone();
+        let (w, h, nchw) = {
+            let session = session_handle.session.lock().unwrap();
+            let (w, h) = model_input_hw(&session, 224, 224);
+            (w, h, model_expects_nchw(&session))
+        };
+        let decode_start = Instant::now();
         let img = image::open(preview_path)?;
         let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
-        let nchw = model_expects_nchw(session);
         let input = if nchw {
-            rgb8_to_nchw(&resized, w, h)
+            rgb8_to_nchw_into(&resized, w, h, &mut self.face_input);
+            self.face_input.clone()
         } else {
-            rgb8_to_nhwc(&resized)
+            rgb8_to_nhwc_into(&resized, &mut self.face_input);
+            self.face_input.clone()
         };
         let input_tensor = if nchw {
             Array::from_shape_vec((1, 3, h as usize, w as usize), input)
@@ -569,9 +758,15 @@ impl TaggingEngine {
             Array::from_shape_vec((1, h as usize, w as usize, 3), input)
         }
         .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .run(vec![input_tensor])
-            .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?;
+        let decode_preprocess = decode_start.elapsed();
+        let infer_start = Instant::now();
+        let outputs: Vec<OrtOwnedTensor<f32, _>> = {
+            let mut session = session_handle.session.lock().unwrap();
+            session
+                .run(vec![input_tensor])
+                .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?
+        };
+        let inference_time = infer_start.elapsed();
         if outputs.is_empty() {
             log::warn!(
                 "Face model returned no outputs for {}",
@@ -586,8 +781,26 @@ impl TaggingEngine {
             self.config.face_min_score
         );
         if max_score >= self.config.face_min_score {
+            if cfg!(debug_assertions) {
+                self.record_timing(
+                    "face",
+                    decode_preprocess,
+                    inference_time,
+                    session_handle.provider,
+                    preview_path,
+                );
+            }
             Ok(max_score)
         } else {
+            if cfg!(debug_assertions) {
+                self.record_timing(
+                    "face",
+                    decode_preprocess,
+                    inference_time,
+                    session_handle.provider,
+                    preview_path,
+                );
+            }
             Ok(0.0)
         }
     }
@@ -1354,6 +1567,91 @@ fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
     best
 }
 
+fn rgb32f_to_nhwc_into(img: &image::Rgb32FImage, output: &mut Vec<f32>) {
+    let len = (img.width() * img.height() * 3) as usize;
+    output.clear();
+    output.resize(len, 0.0);
+    let mut idx = 0usize;
+    for pixel in img.pixels() {
+        output[idx] = pixel[0];
+        output[idx + 1] = pixel[1];
+        output[idx + 2] = pixel[2];
+        idx += 3;
+    }
+}
+
+fn rgb32f_to_nchw_into(img: &image::Rgb32FImage, w: u32, h: u32, output: &mut Vec<f32>) {
+    let plane = (w * h) as usize;
+    output.clear();
+    output.resize(plane * 3, 0.0);
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        output[idx] = pixel[0];
+        output[idx + plane] = pixel[1];
+        output[idx + plane * 2] = pixel[2];
+    }
+}
+
+fn rgb32f_to_nhwc_normalized_into(img: &image::Rgb32FImage, output: &mut Vec<f32>) {
+    let len = (img.width() * img.height() * 3) as usize;
+    output.clear();
+    output.resize(len, 0.0);
+    let mut idx = 0usize;
+    for pixel in img.pixels() {
+        output[idx] = (pixel[0] - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+        output[idx + 1] = (pixel[1] - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+        output[idx + 2] = (pixel[2] - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+        idx += 3;
+    }
+}
+
+fn rgb32f_to_nchw_normalized_into(
+    img: &image::Rgb32FImage,
+    w: u32,
+    h: u32,
+    output: &mut Vec<f32>,
+) {
+    let plane = (w * h) as usize;
+    output.clear();
+    output.resize(plane * 3, 0.0);
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        output[idx] = (pixel[0] - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+        output[idx + plane] = (pixel[1] - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+        output[idx + plane * 2] = (pixel[2] - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+    }
+}
+
+fn rgb32f_to_nhwc_tf_into(img: &image::Rgb32FImage, output: &mut Vec<f32>) {
+    let len = (img.width() * img.height() * 3) as usize;
+    output.clear();
+    output.resize(len, 0.0);
+    let mut idx = 0usize;
+    for pixel in img.pixels() {
+        output[idx] = (pixel[0] * 2.0) - 1.0;
+        output[idx + 1] = (pixel[1] * 2.0) - 1.0;
+        output[idx + 2] = (pixel[2] * 2.0) - 1.0;
+        idx += 3;
+    }
+}
+
+fn rgb32f_to_nchw_tf_into(
+    img: &image::Rgb32FImage,
+    w: u32,
+    h: u32,
+    output: &mut Vec<f32>,
+) {
+    let plane = (w * h) as usize;
+    output.clear();
+    output.resize(plane * 3, 0.0);
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        output[idx] = (pixel[0] * 2.0) - 1.0;
+        output[idx + plane] = (pixel[1] * 2.0) - 1.0;
+        output[idx + plane * 2] = (pixel[2] * 2.0) - 1.0;
+    }
+}
+
 fn rgb32f_to_nhwc(img: &image::Rgb32FImage) -> Vec<f32> {
     let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
     for pixel in img.pixels() {
@@ -1422,6 +1720,31 @@ fn rgb32f_to_nchw_tf(img: &image::Rgb32FImage, w: u32, h: u32) -> Vec<f32> {
     input
 }
 
+fn rgb8_to_nhwc_into(img: &image::RgbImage, output: &mut Vec<f32>) {
+    let len = (img.width() * img.height() * 3) as usize;
+    output.clear();
+    output.resize(len, 0.0);
+    let mut idx = 0usize;
+    for pixel in img.pixels() {
+        output[idx] = pixel[0] as f32 / 255.0;
+        output[idx + 1] = pixel[1] as f32 / 255.0;
+        output[idx + 2] = pixel[2] as f32 / 255.0;
+        idx += 3;
+    }
+}
+
+fn rgb8_to_nchw_into(img: &image::RgbImage, w: u32, h: u32, output: &mut Vec<f32>) {
+    let plane = (w * h) as usize;
+    output.clear();
+    output.resize(plane * 3, 0.0);
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        output[idx] = pixel[0] as f32 / 255.0;
+        output[idx + plane] = pixel[1] as f32 / 255.0;
+        output[idx + plane * 2] = pixel[2] as f32 / 255.0;
+    }
+}
+
 fn rgb8_to_nhwc(img: &image::RgbImage) -> Vec<f32> {
     let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
     for pixel in img.pixels() {
@@ -1469,39 +1792,56 @@ fn letterbox_rgb(
 }
 
 fn run_scene_logits(
-    session: &mut Session<'_>,
+    session_handle: &SessionHandle,
     resized: &image::Rgb32FImage,
     nchw: bool,
     w: u32,
     h: u32,
     mode: ScenePreprocess,
-) -> Result<Vec<f32>> {
-    let input = match (mode, nchw) {
-        (ScenePreprocess::Imagenet, true) => rgb32f_to_nchw_normalized(resized, w, h),
-        (ScenePreprocess::Imagenet, false) => rgb32f_to_nhwc_normalized(resized),
-        (ScenePreprocess::Raw01, true) => rgb32f_to_nchw(resized, w, h),
-        (ScenePreprocess::Raw01, false) => rgb32f_to_nhwc(resized),
-        (ScenePreprocess::TfMinus1, true) => rgb32f_to_nchw_tf(resized, w, h),
-        (ScenePreprocess::TfMinus1, false) => rgb32f_to_nhwc_tf(resized),
+    input_buf: &mut Vec<f32>,
+) -> Result<(Vec<f32>, Duration, Duration)> {
+    let prep_start = Instant::now();
+    match (mode, nchw) {
+        (ScenePreprocess::Imagenet, true) => {
+            rgb32f_to_nchw_normalized_into(resized, w, h, input_buf)
+        }
+        (ScenePreprocess::Imagenet, false) => {
+            rgb32f_to_nhwc_normalized_into(resized, input_buf)
+        }
+        (ScenePreprocess::Raw01, true) => rgb32f_to_nchw_into(resized, w, h, input_buf),
+        (ScenePreprocess::Raw01, false) => rgb32f_to_nhwc_into(resized, input_buf),
+        (ScenePreprocess::TfMinus1, true) => rgb32f_to_nchw_tf_into(resized, w, h, input_buf),
+        (ScenePreprocess::TfMinus1, false) => rgb32f_to_nhwc_tf_into(resized, input_buf),
     };
+    let input = input_buf.clone();
     let input_tensor = if nchw {
         Array::from_shape_vec((1, 3, h as usize, w as usize), input)
     } else {
         Array::from_shape_vec((1, h as usize, w as usize, 3), input)
     }
     .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
-    let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-        .run(vec![input_tensor])
-        .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
+    let preprocess_time = prep_start.elapsed();
+    let infer_start = Instant::now();
+    let outputs: Vec<OrtOwnedTensor<f32, _>> = {
+        let mut session = session_handle.session.lock().unwrap();
+        session
+            .run(vec![input_tensor])
+            .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))? 
+    };
+    let inference_time = infer_start.elapsed();
     if outputs.is_empty() {
         log::warn!("Scene model returned no outputs");
-        return Ok(Vec::new());
+        return Ok((Vec::new(), preprocess_time, inference_time));
     }
-    Ok(outputs
-        .get(0)
-        .and_then(|t| t.as_slice())
-        .unwrap_or(&[])
-        .to_vec())
+    Ok((
+        outputs
+            .get(0)
+            .and_then(|t| t.as_slice())
+            .unwrap_or(&[])
+            .to_vec(),
+        preprocess_time,
+        inference_time,
+    ))
 }
 
 fn top1_prob(logits: &[f32]) -> f32 {
@@ -1519,28 +1859,146 @@ fn top1_prob(logits: &[f32]) -> f32 {
     1.0 / sum
 }
 
-fn safe_session(
+fn session_cache_key(
+    model_path: &Path,
+    preference: InferenceDevicePreference,
+) -> SessionCacheKey {
+    SessionCacheKey {
+        model_path: model_path.to_string_lossy().to_string(),
+        preference,
+    }
+}
+
+fn get_or_create_session(
     env: &'static Environment,
-    model_path: &'static Path,
-    label: &str,
-) -> Option<Session<'static>> {
-    match catch_unwind(AssertUnwindSafe(|| {
-        env.new_session_builder()
-            .ok()
-            .and_then(|b| {
-                b.with_optimization_level(GraphOptimizationLevel::Basic)
-                    .ok()
-            })
-            .and_then(|b| b.with_model_from_file(model_path).ok())
-    })) {
-        Ok(session) => session,
-        Err(_) => {
-            log::warn!(
-                "ONNX session panicked while loading {label} model: {}",
-                model_path.display()
-            );
-            None
+    model_path: &Path,
+    label: &'static str,
+    preference: InferenceDevicePreference,
+    default_w: u32,
+    default_h: u32,
+) -> Option<Arc<SessionHandle>> {
+    let key = session_cache_key(model_path, preference);
+    {
+        let cache = SESSION_CACHE.lock().unwrap();
+        if let Some(handle) = cache.get(&key) {
+            return Some(handle.clone());
         }
+    }
+
+    let created = match create_session_with_preference(
+        env,
+        model_path,
+        label,
+        preference,
+        default_w,
+        default_h,
+    ) {
+        Ok(handle) => Arc::new(handle),
+        Err(err) => {
+            log::warn!("Failed to create {label} session: {err}");
+            return None;
+        }
+    };
+
+    let mut cache = SESSION_CACHE.lock().unwrap();
+    let handle = cache.entry(key).or_insert_with(|| created.clone());
+    Some(handle.clone())
+}
+
+fn create_session_with_preference(
+    env: &'static Environment,
+    model_path: &Path,
+    label: &'static str,
+    preference: InferenceDevicePreference,
+    default_w: u32,
+    default_h: u32,
+) -> std::result::Result<SessionHandle, String> {
+    log_runtime_diagnostics_once();
+
+    let model_path_static: &'static Path =
+        Box::leak(model_path.to_path_buf().into_boxed_path());
+    let try_build = |use_dml: bool| -> std::result::Result<Session<'static>, String> {
+        let build = || -> std::result::Result<Session<'static>, String> {
+            let mut builder = env
+                .new_session_builder()
+                .map_err(|e| format!("{e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Basic)
+                .map_err(|e| format!("{e}"))?;
+            if use_dml {
+                builder = builder
+                    .with_disable_mem_pattern()
+                    .map_err(|e| format!("{e}"))?
+                    .with_execution_mode_sequential()
+                    .map_err(|e| format!("{e}"))?
+                    .with_directml(0)
+                    .map_err(|e| format!("{e}"))?;
+            }
+            builder
+                .with_model_from_file(model_path_static)
+                .map_err(|e| format!("{e}"))
+        };
+        match catch_unwind(AssertUnwindSafe(build)) {
+            Ok(res) => res,
+            Err(_) => Err("ONNX runtime panic while building session".into()),
+        }
+    };
+
+    let mut warning: Option<String> = None;
+    let (provider, mut session) = match preference {
+        InferenceDevicePreference::Cpu => (InferenceProvider::Cpu, try_build(false)?),
+        InferenceDevicePreference::Gpu | InferenceDevicePreference::Auto => match try_build(true) {
+            Ok(session) => (InferenceProvider::DirectML, session),
+            Err(err) => {
+                let msg = format!("DirectML provider unavailable for {label}: {err}");
+                if preference == InferenceDevicePreference::Gpu {
+                    warning = Some(msg.clone());
+                    log::warn!("{msg}");
+                } else {
+                    log::info!("{msg}; falling back to CPU");
+                }
+                (InferenceProvider::Cpu, try_build(false)?)
+            }
+        },
+    };
+
+    if let Some(message) = warning {
+        *INFERENCE_WARNING.lock().unwrap() = Some(message);
+    }
+
+    warmup_session(&mut session, label, default_w, default_h);
+
+    log::info!(
+        "ONNX session ready for {label}: provider={}",
+        provider.label()
+    );
+
+    Ok(SessionHandle {
+        session: Mutex::new(session),
+        provider,
+        label,
+        model_path: model_path_static,
+    })
+}
+
+fn warmup_session(session: &mut Session<'_>, label: &str, default_w: u32, default_h: u32) {
+    let (w, h) = model_input_hw(session, default_w, default_h);
+    let nchw = model_expects_nchw(session);
+    let (shape, len) = if nchw {
+        ((1, 3, h as usize, w as usize), (w * h * 3) as usize)
+    } else {
+        ((1, h as usize, w as usize, 3), (w * h * 3) as usize)
+    };
+    let input = vec![0.0f32; len];
+    let input_tensor = Array::from_shape_vec(shape, input);
+    let input_tensor = match input_tensor {
+        Ok(t) => t,
+        Err(err) => {
+            log::warn!("Warmup tensor build failed for {label}: {err}");
+            return;
+        }
+    };
+    if let Err(err) = session.run::<f32, f32, _>(vec![input_tensor]) {
+        log::warn!("Warmup run failed for {label}: {err}");
     }
 }
 
@@ -1551,6 +2009,77 @@ where
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(res) => res.map_err(|e| format!("{e}")),
         Err(_) => Err("ONNX runtime panic".into()),
+    }
+}
+
+pub fn clear_session_cache() {
+    SESSION_CACHE.lock().unwrap().clear();
+    *INFERENCE_WARNING.lock().unwrap() = None;
+}
+
+pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
+    let preference = config.inference_device;
+    let mut models = Vec::new();
+    let mut provider_label = "Unavailable".to_string();
+    let mut had_provider = false;
+
+    let try_model = |label: &'static str,
+                     model_path: &Path,
+                     default_w: u32,
+                     default_h: u32|
+     -> Option<String> {
+        if !model_path.exists() {
+            return None;
+        }
+        let env = ORT_ENV.as_ref().copied()?;
+        let handle =
+            get_or_create_session(env, model_path, label, preference, default_w, default_h)?;
+        Some(handle.provider.label().to_string())
+    };
+
+    if let Some(provider) =
+        try_model("scene", &config.scene_model_path, 224, 224)
+    {
+        provider_label = provider.clone();
+        had_provider = true;
+        models.push(InferenceModelStatus {
+            label: "scene".to_string(),
+            provider,
+        });
+    }
+    if let Some(provider) =
+        try_model("detection", &config.detection_model_path, 640, 640)
+    {
+        if !had_provider {
+            provider_label = provider.clone();
+            had_provider = true;
+        }
+        models.push(InferenceModelStatus {
+            label: "detection".to_string(),
+            provider,
+        });
+    }
+    if let Some(provider) =
+        try_model("face", &config.face_model_path, 224, 224)
+    {
+        if !had_provider {
+            provider_label = provider.clone();
+        }
+        models.push(InferenceModelStatus {
+            label: "face".to_string(),
+            provider,
+        });
+    }
+
+    let warning = INFERENCE_WARNING.lock().unwrap().clone();
+    let runtime_version = ort_runtime_version();
+
+    InferenceStatus {
+        preference: preference.label().to_string(),
+        provider: provider_label,
+        warning,
+        runtime_version,
+        models,
     }
 }
 
