@@ -108,11 +108,23 @@ fn process_file(
         .unwrap_or_default()
         .to_lowercase();
 
-    let exif = exiftool::read_metadata(paths, path).unwrap_or_default();
+    let exif = match exiftool::read_metadata(paths, path) {
+        Ok(exif) => exif,
+        Err(err) => {
+            log::warn!("Exif metadata read failed for {}: {}", path.display(), err);
+            crate::models::ExifMetadata::default()
+        }
+    };
 
     let preview_output = paths.previews_dir.join(format!("{}_preview.jpg", hash));
 
-    let has_preview = exiftool::extract_preview(paths, path, &preview_output).unwrap_or(false);
+    let has_preview = match exiftool::extract_preview(paths, path, &preview_output) {
+        Ok(value) => value,
+        Err(err) => {
+            log::warn!("Preview extraction failed for {}: {}", path.display(), err);
+            false
+        }
+    };
     let preview_path = if has_preview && preview_output.exists() {
         Some(preview_output)
     } else {
