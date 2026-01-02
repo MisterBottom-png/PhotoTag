@@ -13,6 +13,14 @@
     "allowlist": {
       "dialog": {
         "open": true
+      },
+      "fs": {
+        "all": true,
+        "scope": ["$APPDATA/**"]
+      },
+      "protocol": {
+        "asset": true,
+        "assetScope": ["$APPDATA/**"]
       }
     },
     "windows": [
