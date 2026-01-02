@@ -754,8 +754,8 @@ select {
   right: 0;
   top: 0;
   transform: translateY(-6px);
-  padding: 6px 10px;
-  font-size: 11px;
+  padding: 4px 8px;
+  font-size: clamp(10px, 1.1vw, 11px);
   color: #f8fafc;
   background: rgba(108, 116, 132, 0.92);
   border-bottom: 1px solid rgba(150, 160, 178, 0.6);
@@ -769,6 +769,11 @@ select {
   text-overflow: ellipsis;
   box-shadow: 0 10px 18px rgba(5, 10, 20, 0.35);
   z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
+  min-height: 22px;
 }
 
 .thumb.filmstrip:hover .thumb-overlay {
