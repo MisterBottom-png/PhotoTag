@@ -146,17 +146,26 @@ pub fn extract_preview(paths: &AppPaths, file_path: &Path, out_path: &Path) -> R
         }
         let tag_arg = format!("-{tag}");
         let output = Command::new(&exe)
-            .args(["-b", &tag_arg, "-o"])
-            .arg(out_path)
+            .args(["-b", &tag_arg])
             .arg(file_path)
             .output()
             .map_err(|e| Error::Init(format!("Failed to execute ExifTool: {e}")))?;
-
-        if output.status.success() && out_path.exists() {
+        if !output.stdout.is_empty() {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(out_path, &output.stdout)?;
             if let Ok(meta) = std::fs::metadata(out_path) {
                 if meta.len() > 0 {
                     return Ok(true);
                 }
+            }
+        } else if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() && !stderr.to_ascii_lowercase().contains("warning") {
+                return Err(Error::Init(format!(
+                    "ExifTool failed to extract {tag}: {stderr}"
+                )));
             }
         }
     }
