@@ -1879,6 +1879,9 @@ fn get_or_create_session(
     default_w: u32,
     default_h: u32,
 ) -> Option<Arc<SessionHandle>> {
+    if !model_path.exists() {
+        return None;
+    }
     let key = session_cache_key(model_path, preference);
     {
         let cache = SESSION_CACHE.lock().unwrap();
@@ -1915,6 +1918,9 @@ fn create_session_with_preference(
     default_w: u32,
     default_h: u32,
 ) -> std::result::Result<SessionHandle, String> {
+    if !model_path.exists() {
+        return Err(format!("Model not found: {}", model_path.display()));
+    }
     log_runtime_diagnostics_once();
 
     let model_path_static: &'static Path =
