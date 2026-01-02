@@ -5,14 +5,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openExternal } from "@tauri-apps/api/shell";
 import { dirname } from "@tauri-apps/api/path";
 
-const SMART_VIEWS = [
-  { key: "UNSORTED", label: "Unsorted", helper: "Unrated, unpicked, unrejected" },
-  { key: "PICKS", label: "Picks", helper: "Picked and not rejected" },
-  { key: "REJECTS", label: "Rejects", helper: "Marked as rejected" },
-  { key: "LAST_IMPORT", label: "Last import", helper: "Most recent batch" },
-  { key: "ALL", label: "All photos", helper: "Everything in the library" },
-];
-
 const SORT_OPTIONS = [
   { value: "date_taken", label: "Date (newest)" },
   { value: "last_modified", label: "Last modified" },
@@ -85,6 +77,21 @@ function RatingStars({ value, onChange, compact, showClear = false }) {
         </button>
       )}
     </div>
+  );
+}
+
+function ArrowIcon({ direction = "left" }) {
+  const isLeft = direction === "left";
+  return (
+    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <path
+        d={isLeft ? "M15 4L7 12L15 20" : "M9 4L17 12L9 20"}
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -206,15 +213,13 @@ function EmptyState({ onImport, onClearFilters }) {
 
 export default function App() {
   const [mode, setMode] = usePersistentState("pt-mode", "CULL");
-  const [smartView, setSmartView] = useState("UNSORTED");
-  const [browseSmartView, setBrowseSmartView] = usePersistentState("pt-browse-smart-view", "ALL");
+  const [smartView, setSmartView] = useState("ALL");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [thumbSize, setThumbSize] = usePersistentState("pt-thumb-size", 190);
   const [autoAdvance, setAutoAdvance] = usePersistentState("pt-auto-advance", true);
   const [photos, setPhotos] = useState([]);
   const [selection, setSelection] = useState([]);
   const [cursorIndex, setCursorIndex] = useState(0);
-  const [counts, setCounts] = useState({ unsorted: 0, picks: 0, rejects: 0, last_import: 0, all: 0 });
   const [progress, setProgress] = useState({ discovered: 0, processed: 0, current_file: "" });
   const [errorMessage, setErrorMessage] = useState("");
   const [rerunLoading, setRerunLoading] = useState(false);
@@ -223,6 +228,7 @@ export default function App() {
   const lastActionRef = useRef(null);
   const searchRef = useRef(null);
   const anchorRef = useRef(null);
+  const filmstripRef = useRef(null);
   const toastTimerRef = useRef(null);
 
   const activePhoto = useMemo(() => {
@@ -235,18 +241,13 @@ export default function App() {
       setProgress(event.payload);
     });
     refreshPhotos({ resetCursor: true });
-    refreshCounts();
     return () => {
       unlisten.then((fn) => fn());
     };
   }, []);
 
   useEffect(() => {
-    if (mode === "CULL") {
-      setSmartView("UNSORTED");
-    } else {
-      setSmartView(browseSmartView || "ALL");
-    }
+    setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
@@ -269,7 +270,6 @@ export default function App() {
 
   useEffect(() => {
     refreshPhotos({ resetCursor: true });
-    refreshCounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smartView, filters.sort_by, filters.search, mode]);
 
@@ -325,15 +325,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [photos.length, cursorIndex, selection, smartView]);
 
-  const refreshCounts = async () => {
-    try {
-      const data = await invoke("get_smart_views_counts");
-      setCounts(data);
-    } catch (err) {
-      setErrorMessage(`Failed to load counts: ${err}`);
-    }
-  };
-
   const updateSelectionAfterRefresh = (list, options) => {
     if (!list.length) {
       setSelection([]);
@@ -386,6 +377,13 @@ export default function App() {
     anchorRef.current = next;
   };
 
+  const scrollFilmstrip = (direction) => {
+    const el = filmstripRef.current;
+    if (!el) return;
+    const amount = Math.max(el.clientWidth * 0.8, 220) * direction;
+    el.scrollBy({ left: amount, behavior: "smooth" });
+  };
+
   const applyCullChange = async ({ rating, picked, rejected, label }) => {
     const ids = selection.length
       ? selection
@@ -416,7 +414,6 @@ export default function App() {
       }
       lastActionRef.current = { before };
       setToast({ message: label || "Updated", canUndo: true });
-      await refreshCounts();
       const preferredIndex = autoAdvance ? cursorIndex + 1 : cursorIndex;
       await refreshPhotos({ preferredIndex });
     } catch (err) {
@@ -444,9 +441,8 @@ export default function App() {
       if (dir) {
         setImporting(true);
         await invoke("import_folder", { path: dir });
-        setSmartView("UNSORTED");
+        setSmartView(mode === "CULL" ? "UNSORTED" : "ALL");
         await refreshPhotos({ resetCursor: true });
-        await refreshCounts();
       }
     } catch (err) {
       setErrorMessage(`Import failed: ${err}`);
@@ -519,7 +515,6 @@ export default function App() {
           });
         }
       }
-      await refreshCounts();
       await refreshPhotos();
     } catch (err) {
       setErrorMessage(`Undo failed: ${err}`);
@@ -590,69 +585,37 @@ export default function App() {
       {errorMessage && <div className="banner error-banner">{errorMessage}</div>}
 
       <div className="content">
-        <aside className="panel sidebar">
-          <div className="section">
-            <div className="section-head">
-              <h3>Smart views</h3>
-              <button className="ghost small" onClick={refreshCounts}>
-                Refresh
-              </button>
+        <main className={mode === "CULL" ? "cull" : "browse"}>
+          {mode !== "CULL" && (
+            <div className="view-toolbar">
+            <div className="toolbar-group">
+              <label className="toolbar-item">
+                <span>Sort by</span>
+                <select
+                  value={filters.sort_by}
+                  onChange={(e) => setFilters((f) => ({ ...f, sort_by: e.target.value }))}
+                >
+                  {SORT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {mode !== "CULL" && (
+                <label className="toolbar-item slider">
+                  <span>Thumbnail size</span>
+                  <input
+                    type="range"
+                    min="120"
+                    max="320"
+                    value={thumbSize}
+                    onChange={(e) => setThumbSize(Number(e.target.value))}
+                  />
+                </label>
+              )}
             </div>
-            <div className="smart-list">
-              {SMART_VIEWS.filter((v) => mode === "CULL" ? v.key === "UNSORTED" : true).map((view) => {
-                const countKey = view.key.toLowerCase();
-                const countValue = counts[countKey] ?? (view.key === "ALL" ? counts.all : 0);
-                const disabled = mode === "CULL";
-                return (
-                  <button
-                    key={view.key}
-                    className={`smart-item ${smartView === view.key ? "active" : ""} ${disabled ? "disabled" : ""}`}
-                    onClick={() => {
-                      if (disabled) return;
-                      setSmartView(view.key);
-                      setBrowseSmartView(view.key);
-                    }}
-                    disabled={disabled}
-                  >
-                    <div>
-                      <div className="label">{view.label}</div>
-                      <div className="helper">
-                        {disabled ? "Other smart views are available in Browse." : view.helper}
-                      </div>
-                    </div>
-                    <span className="count">{countValue ?? 0}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="section">
-            <h3>Filters</h3>
-            <label className="stacked">
-              Sort by
-              <select
-                value={filters.sort_by}
-                onChange={(e) => setFilters((f) => ({ ...f, sort_by: e.target.value }))}
-              >
-                {SORT_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stacked slider">
-              Thumbnail size
-              <input
-                type="range"
-                min="120"
-                max="320"
-                value={thumbSize}
-                onChange={(e) => setThumbSize(Number(e.target.value))}
-              />
-            </label>
-            <label className="checkbox">
+            <label className="toolbar-toggle">
               <input
                 type="checkbox"
                 checked={autoAdvance}
@@ -660,10 +623,8 @@ export default function App() {
               />
               Auto-advance after action
             </label>
-          </div>
-        </aside>
-
-        <main className={mode === "CULL" ? "cull" : "browse"}>
+            </div>
+          )}
           {photos.length === 0 ? (
             <EmptyState
               onImport={handleImport}
@@ -673,56 +634,63 @@ export default function App() {
                   setSmartView("UNSORTED");
                 } else {
                   setSmartView("ALL");
-                  setBrowseSmartView("ALL");
                 }
               }}
             />
           ) : mode === "CULL" ? (
             <div className="cull-view">
               <div className="cull-preview">
-                {activePhoto?.photo.preview_path ? (
-                  <img
-                    src={resolvePath(activePhoto.photo.preview_path)}
-                    alt={activePhoto.photo.file_name}
-                    className="preview-large"
-                  />
-                ) : (
-                  <div className="thumb-placeholder large">No preview</div>
-                )}
-                <div className="cull-controls">
-                  <RatingStars
-                    value={activePhoto?.photo.rating || 0}
-                    onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
-                  />
-                  <div className="cull-buttons">
-                    <button className={activePhoto?.photo.picked ? "active" : ""} onClick={togglePick}>
-                      Pick (P)
+                <div className="preview-stage">
+                  <div className="preview-frame">
+                    <button className="nav-arrow prev" onClick={() => moveCursor(-1)} aria-label="Previous photo">
+                      <ArrowIcon direction="left" />
                     </button>
-                    <button className={activePhoto?.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
-                      Reject (X)
-                    </button>
-                  </div>
-                  <div className="cull-nav">
-                    <button className="ghost" onClick={() => moveCursor(-1)}>
-                      Prev
-                    </button>
-                    <button className="ghost" onClick={() => moveCursor(1)}>
-                      Next
+                    {activePhoto?.photo.preview_path ? (
+                      <img
+                        src={resolvePath(activePhoto.photo.preview_path)}
+                        alt={activePhoto.photo.file_name}
+                        className="preview-large"
+                      />
+                    ) : (
+                      <div className="thumb-placeholder large">No preview</div>
+                    )}
+                    <button className="nav-arrow next" onClick={() => moveCursor(1)} aria-label="Next photo">
+                      <ArrowIcon direction="right" />
                     </button>
                   </div>
                 </div>
               </div>
-              <div className="filmstrip" style={{ ["--thumb-size"]: `${thumbSize}px` }}>
-                {photos.map((p, idx) => (
-                  <ThumbCard
-                    key={p.photo.id}
-                    photo={p.photo}
-                    selected={selection.includes(p.photo.id)}
-                    onSelect={(e) => onSelectPhoto(p.photo.id, idx, e)}
-                    onDoubleClick={() => setSelection([p.photo.id])}
-                    thumbSize={thumbSize}
-                  />
-                ))}
+              <div className="filmstrip-wrap">
+                <button
+                  className="strip-arrow prev"
+                  onClick={() => scrollFilmstrip(-1)}
+                  aria-label="Scroll filmstrip left"
+                >
+                  <ArrowIcon direction="left" />
+                </button>
+                <div
+                  className="filmstrip"
+                  style={{ ["--thumb-size"]: "var(--filmstrip-thumb-size)" }}
+                  ref={filmstripRef}
+                >
+                  {photos.map((p, idx) => (
+                    <ThumbCard
+                      key={p.photo.id}
+                      photo={p.photo}
+                      selected={selection.includes(p.photo.id)}
+                      onSelect={(e) => onSelectPhoto(p.photo.id, idx, e)}
+                      onDoubleClick={() => setSelection([p.photo.id])}
+                      thumbSize={120}
+                    />
+                  ))}
+                </div>
+                <button
+                  className="strip-arrow next"
+                  onClick={() => scrollFilmstrip(1)}
+                  aria-label="Scroll filmstrip right"
+                >
+                  <ArrowIcon direction="right" />
+                </button>
               </div>
             </div>
           ) : (
@@ -745,28 +713,33 @@ export default function App() {
           {activePhoto ? (
             <>
               <div className="detail-head">
-                <div>
-                  <h3 className="file-title">{activePhoto.photo.file_name}</h3>
+                <div className="detail-title">
+                  <div className="file-title">{activePhoto.photo.file_name}</div>
                   <div className="muted truncate">{activePhoto.photo.path}</div>
                 </div>
                 <div className="detail-actions">
-                  <button className="ghost" onClick={handleShowInFolder}>
+                  <button className="ghost show-folder" onClick={handleShowInFolder}>
                     Show in folder
                   </button>
                 </div>
               </div>
               <div className="action-block">
-                <RatingStars
-                  value={activePhoto.photo.rating || 0}
-                  onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
-                />
-                <div className="pill-row">
-                  <button className={activePhoto.photo.picked ? "active" : ""} onClick={togglePick}>
-                    Pick
-                  </button>
-                  <button className={activePhoto.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
-                    Reject
-                  </button>
+                <div className="rating-stack">
+                  <RatingStars
+                    value={activePhoto.photo.rating || 0}
+                    onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
+                  />
+                  <div className="rating-actions">
+                    <button className={activePhoto.photo.picked ? "active" : ""} onClick={togglePick}>
+                      Pick
+                    </button>
+                    <button className={activePhoto.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
+                      Reject
+                    </button>
+                    <button className="clear-rating" onClick={() => applyCullChange({ rating: null, label: "Rating cleared" })}>
+                      Clear rating
+                    </button>
+                  </div>
                 </div>
               </div>
               <div className="meta">
@@ -813,9 +786,6 @@ export default function App() {
               <div className="detail-actions dual">
                 <button className="secondary" onClick={handleRerun} disabled={rerunLoading}>
                   {rerunLoading ? "Processing..." : "Re-run auto tagging"}
-                </button>
-                <button className="ghost" onClick={() => applyCullChange({ rating: null, label: "Rating cleared" })}>
-                  Clear rating
                 </button>
               </div>
             </>
