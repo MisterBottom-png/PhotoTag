@@ -44,6 +44,12 @@ This application relies on external binaries and machine learning models that mu
   3. Add a labels sidecar for the scene model (e.g. `scene_classifier.labels.txt`) with one label per line.
   4. Update the `config.rs` file with the correct model filenames or adjust `TaggingConfig` accordingly.
 
+Optional: You can also provide a lightweight object detector (YOLOv5n or similar) to improve coarse tags like `person`, `cat`, `dog`, or `vehicle`.
+
+1. Place the detector in `models/person_detector.onnx` (or update `TaggingConfig::detection_model_path`).
+2. Add `models/person_detector.labels.txt` with COCO class names (a default file is included in this repo).
+3. (Optional) Add `models/person_detector.tags.txt` to map detection labels to your own tags.
+
 The `build.rs` script is configured to automatically copy the `bin/` and `models/` directories into your final application bundle, ensuring they are available at runtime.
 
 ## Development Setup

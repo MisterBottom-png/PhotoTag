@@ -10,7 +10,7 @@ use onnxruntime::{
     tensor::OrtOwnedTensor,
     GraphOptimizationLevel, LoggingLevel,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -33,6 +33,8 @@ pub struct TaggingEngine {
     onnx_enabled: bool,
     scene_labels: Vec<String>,
     scene_label_map: HashMap<String, Vec<String>>,
+    detection_labels: Vec<String>,
+    detection_label_map: HashMap<String, Vec<String>>,
 }
 
 impl TaggingEngine {
@@ -57,6 +59,8 @@ impl TaggingEngine {
                 onnx_enabled: false,
                 scene_labels: Vec::new(),
                 scene_label_map: HashMap::new(),
+                detection_labels: Vec::new(),
+                detection_label_map: HashMap::new(),
             });
         }
 
@@ -81,6 +85,8 @@ impl TaggingEngine {
             Box::leak(config.face_model_path.clone().into_boxed_path());
         let scene_labels = load_labels_from_model(&scene_path);
         let scene_label_map = load_label_map(&scene_path);
+        let detection_labels = load_labels_from_model(&detect_path);
+        let detection_label_map = load_label_map(&detect_path);
 
         let scene_session = ORT_ENV
             .as_ref()
@@ -121,6 +127,8 @@ impl TaggingEngine {
             onnx_enabled,
             scene_labels,
             scene_label_map,
+            detection_labels,
+            detection_label_map,
         })
     }
 
@@ -133,11 +141,21 @@ impl TaggingEngine {
     }
 
     pub fn classify(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<TaggingResult> {
-        let mut tags: HashMap<String, f32> = HashMap::new();
         let scene_probs = match safe_run(|| self.run_scene(preview_path)) {
             Ok(map) => map,
             Err(err) => {
                 log::warn!("Scene model failed for {}: {}", preview_path.display(), err);
+                HashMap::new()
+            }
+        };
+        let detection_probs = match safe_run(|| self.run_detection(preview_path)) {
+            Ok(map) => map,
+            Err(err) => {
+                log::warn!(
+                    "Detection model failed for {}: {}",
+                    preview_path.display(),
+                    err
+                );
                 HashMap::new()
             }
         };
@@ -153,8 +171,21 @@ impl TaggingEngine {
             }
         };
 
+        let mut tags: HashMap<String, f32> = HashMap::new();
+        let detection_set: HashSet<String> = detection_probs.keys().cloned().collect();
         for (tag, score) in scene_probs {
-            tags.insert(tag, score);
+            let mut adjusted = score;
+            if !detection_set.is_empty() && !detection_set.contains(&tag) {
+                adjusted *= SCENE_UNRELATED_PENALTY;
+            }
+            tags.insert(tag, adjusted);
+        }
+        for (tag, score) in detection_probs {
+            let boosted = (score + DETECTION_TAG_BOOST).min(1.0);
+            let entry = tags.entry(tag).or_insert(0.0);
+            if boosted > *entry {
+                *entry = boosted;
+            }
         }
         if portrait_score > 0.0 {
             let entry = tags.entry("portrait".into()).or_insert(0.0);
@@ -206,30 +237,82 @@ impl TaggingEngine {
             if !self.scene_labels.is_empty() {
                 let max_labels = logits.len().min(self.scene_labels.len());
                 let probs = softmax(&logits[..max_labels]);
-                let mut scored: Vec<(String, f32)> = self.scene_labels[..max_labels]
+                let scored: Vec<(String, f32)> = self.scene_labels[..max_labels]
                     .iter()
                     .cloned()
                     .zip(probs.into_iter())
                     .collect();
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                let mut processed = std::collections::HashSet::new();
-                let mut added = 0usize;
-                for (label, prob) in scored.iter() {
-                    if *prob >= self.config.confidence_threshold {
-                        processed.insert(label.clone());
-                        added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
-                        if added >= MAX_SCENE_TAGS {
-                            break;
+                if !self.scene_label_map.is_empty() {
+                    let mut group_scores: HashMap<String, f32> = HashMap::new();
+                    let mut group_counts: HashMap<String, usize> = HashMap::new();
+                    let mut topk: Vec<(String, f32)> = scored.clone();
+                    topk.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    if topk.len() > SCENE_GROUP_TOPK {
+                        topk.truncate(SCENE_GROUP_TOPK);
+                    }
+                    for (label, _) in topk.iter() {
+                        if let Some(tags) = self.scene_label_map.get(label) {
+                            for tag in tags {
+                                *group_counts.entry(tag.clone()).or_insert(0) += 1;
+                            }
                         }
                     }
-                }
-                if added < MAX_SCENE_TAGS {
                     for (label, prob) in scored.iter() {
-                        if processed.contains(label) {
-                            continue;
+                        if let Some(tags) = self.scene_label_map.get(label) {
+                            for tag in tags {
+                                let entry = group_scores.entry(tag.clone()).or_insert(0.0);
+                                *entry += *prob;
+                            }
                         }
-                        if *prob >= self.config.suggestion_threshold {
+                    }
+                    group_scores.retain(|tag, _| {
+                        group_counts
+                            .get(tag)
+                            .copied()
+                            .unwrap_or(0)
+                            >= SCENE_GROUP_MIN_LABELS
+                    });
+                    let mut grouped: Vec<(String, f32)> = group_scores.into_iter().collect();
+                    grouped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut added = 0usize;
+                    for (tag, score) in grouped.iter() {
+                        if *score >= self.config.confidence_threshold {
+                            map.insert(tag.clone(), *score);
+                            added += 1;
+                            if added >= MAX_SCENE_TAGS {
+                                break;
+                            }
+                        }
+                    }
+                    if added < MAX_SCENE_TAGS {
+                        for (tag, score) in grouped.iter() {
+                            if map.contains_key(tag) {
+                                continue;
+                            }
+                            if *score >= self.config.suggestion_threshold {
+                                map.insert(tag.clone(), *score);
+                                added += 1;
+                                if added >= MAX_SCENE_TAGS {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if added == 0 {
+                        for (tag, score) in grouped.iter().take(MAX_SCENE_TAGS) {
+                            map.insert(tag.clone(), *score);
+                        }
+                    }
+                } else {
+                    let mut scored = scored;
+                    scored.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let mut processed = std::collections::HashSet::new();
+                    let mut added = 0usize;
+                    for (label, prob) in scored.iter() {
+                        if *prob >= self.config.confidence_threshold {
                             processed.insert(label.clone());
                             added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
                             if added >= MAX_SCENE_TAGS {
@@ -237,10 +320,29 @@ impl TaggingEngine {
                             }
                         }
                     }
-                }
-                if added == 0 {
-                    for (label, prob) in scored.iter().take(MAX_SCENE_TAGS) {
-                        added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
+                    if added < MAX_SCENE_TAGS {
+                        for (label, prob) in scored.iter() {
+                            if processed.contains(label) {
+                                continue;
+                            }
+                            if *prob >= self.config.suggestion_threshold {
+                                processed.insert(label.clone());
+                                added += apply_scene_label(
+                                    &mut map,
+                                    &self.scene_label_map,
+                                    label,
+                                    *prob,
+                                );
+                                if added >= MAX_SCENE_TAGS {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if added == 0 {
+                        for (label, prob) in scored.iter().take(MAX_SCENE_TAGS) {
+                            added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
+                        }
                     }
                 }
             } else {
@@ -265,6 +367,76 @@ impl TaggingEngine {
             .unwrap_or(0.0);
         let score = (face_score + focal_boost).min(1.0).max(0.0);
         Ok(score)
+    }
+
+    fn run_detection(&mut self, preview_path: &Path) -> Result<HashMap<String, f32>> {
+        if self.detection_session.is_none() {
+            return Ok(HashMap::new());
+        }
+        let session = self.detection_session.as_mut().unwrap();
+        let (w, h) = model_input_hw(session, 640, 640);
+        let img = image::open(preview_path)?;
+        let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
+        let nchw = model_expects_nchw(session);
+        let input = if nchw {
+            rgb8_to_nchw(&resized, w, h)
+        } else {
+            rgb8_to_nhwc(&resized)
+        };
+        let input_tensor = if nchw {
+            Array::from_shape_vec((1, 3, h as usize, w as usize), input)
+        } else {
+            Array::from_shape_vec((1, h as usize, w as usize, 3), input)
+        }
+        .map_err(|e| Error::Init(format!("Invalid detection tensor shape: {e}")))?;
+        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
+            .run(vec![input_tensor])
+            .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?;
+        if !outputs.is_empty() {
+            let shapes = outputs
+                .iter()
+                .map(|o| format!("{:?}", o.shape()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::info!("Detection outputs: {shapes}");
+        }
+        let class_scores = detection_class_scores(&outputs);
+        if class_scores.is_empty() {
+            log::warn!(
+                "Detection model returned no class scores for {}",
+                preview_path.display()
+            );
+            return Ok(HashMap::new());
+        }
+        if let Some((best_id, best_score)) = class_scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            if let Some(label) = self.detection_labels.get(*best_id) {
+                log::info!(
+                    "Top detection for {}: {} ({:.2})",
+                    preview_path.display(),
+                    label,
+                    best_score
+                );
+            }
+        }
+        let mut tags = HashMap::new();
+        for (class_id, score) in class_scores {
+            let label = match self.detection_labels.get(class_id) {
+                Some(name) => name.as_str(),
+                None => continue,
+            };
+            if !self.detection_label_map.is_empty() {
+                apply_detection_label(&mut tags, &self.detection_label_map, label, score);
+            } else if let Some(tag) = default_detection_tag(label) {
+                let entry = tags.entry(tag.to_string()).or_insert(0.0);
+                if score > *entry {
+                    *entry = score;
+                }
+            }
+        }
+        Ok(tags)
     }
 
     fn run_face(&mut self, preview_path: &Path) -> Result<f32> {
@@ -565,6 +737,11 @@ fn normalize_label(line: &str) -> Option<String> {
 const MAX_SCENE_TAGS: usize = 5;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+const SCENE_GROUP_TOPK: usize = 10;
+const SCENE_GROUP_MIN_LABELS: usize = 2;
+const SCENE_UNRELATED_PENALTY: f32 = 0.6;
+const DETECTION_MIN_SCORE: f32 = 0.25;
+const DETECTION_TAG_BOOST: f32 = 0.30;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ScenePreprocess {
@@ -612,6 +789,194 @@ fn apply_scene_label(
         return added;
     }
     0
+}
+
+fn apply_detection_label(
+    map: &mut HashMap<String, f32>,
+    label_map: &HashMap<String, Vec<String>>,
+    label: &str,
+    score: f32,
+) {
+    if let Some(tags) = label_map.get(label) {
+        for tag in tags {
+            let entry = map.entry(tag.clone()).or_insert(0.0);
+            if score > *entry {
+                *entry = score;
+            }
+        }
+    }
+}
+
+fn default_detection_tag(label: &str) -> Option<&'static str> {
+    match label {
+        "person" => Some("person"),
+        "cat" => Some("cat"),
+        "dog" => Some("dog"),
+        "bird" => Some("bird"),
+        "horse" | "sheep" | "cow" | "elephant" | "bear" | "zebra" | "giraffe" => Some("animal"),
+        "bicycle"
+        | "car"
+        | "motorcycle"
+        | "airplane"
+        | "bus"
+        | "train"
+        | "truck"
+        | "boat" => Some("vehicle"),
+        _ => None,
+    }
+}
+
+fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usize, f32> {
+    let mut scores: HashMap<usize, f32> = HashMap::new();
+    if outputs.len() == 2 {
+        if let Some(paired) = detection_scores_from_pair(outputs) {
+            return paired;
+        }
+    }
+    for output in outputs {
+        let shape = output.shape();
+        let Some(slice) = output.as_slice() else {
+            continue;
+        };
+        if shape.len() >= 4 && shape[shape.len() - 1] >= 5 {
+            let stride = shape[shape.len() - 1] as usize;
+            for row in slice.chunks_exact(stride) {
+                let obj = sigmoid(row[4]);
+                if !obj.is_finite() {
+                    continue;
+                }
+                for (idx, prob) in row[5..].iter().enumerate() {
+                    if !prob.is_finite() {
+                        continue;
+                    }
+                    let score = (obj * sigmoid(*prob)).max(0.0).min(1.0);
+                    if score < DETECTION_MIN_SCORE {
+                        continue;
+                    }
+                    let entry = scores.entry(idx).or_insert(0.0);
+                    if score > *entry {
+                        *entry = score;
+                    }
+                }
+            }
+        } else if shape.len() == 3 {
+            let dim1 = shape[1] as usize;
+            let dim2 = shape[2] as usize;
+            if dim1 >= 5 && dim2 > dim1 {
+                for col in 0..dim2 {
+                    let base = col * dim1;
+                    let obj = sigmoid(slice[base + 4]);
+                    if !obj.is_finite() {
+                        continue;
+                    }
+                    for cls in 0..(dim1 - 5) {
+                        let prob = slice[base + 5 + cls];
+                        if !prob.is_finite() {
+                            continue;
+                        }
+                        let score = (obj * sigmoid(prob)).max(0.0).min(1.0);
+                        if score < DETECTION_MIN_SCORE {
+                            continue;
+                        }
+                        let entry = scores.entry(cls).or_insert(0.0);
+                        if score > *entry {
+                            *entry = score;
+                        }
+                    }
+                }
+            } else if dim2 >= 5 && dim1 > dim2 {
+                let stride = dim2;
+                for row in slice.chunks_exact(stride) {
+                    let obj = sigmoid(row[4]);
+                    if !obj.is_finite() {
+                        continue;
+                    }
+                    for (idx, prob) in row[5..].iter().enumerate() {
+                        if !prob.is_finite() {
+                            continue;
+                        }
+                        let score = (obj * sigmoid(*prob)).max(0.0).min(1.0);
+                        if score < DETECTION_MIN_SCORE {
+                            continue;
+                        }
+                        let entry = scores.entry(idx).or_insert(0.0);
+                        if score > *entry {
+                            *entry = score;
+                        }
+                    }
+                }
+            }
+        } else if shape.len() == 2 {
+            let classes = shape[shape.len() - 1] as usize;
+            if classes == 0 {
+                continue;
+            }
+            let logits = &slice[..slice.len().min(classes)];
+            let probs = softmax(logits);
+            for (idx, prob) in probs.into_iter().enumerate() {
+                if prob < DETECTION_MIN_SCORE {
+                    continue;
+                }
+                let entry = scores.entry(idx).or_insert(0.0);
+                if prob > *entry {
+                    *entry = prob;
+                }
+            }
+        }
+    }
+    scores
+}
+
+fn detection_scores_from_pair(
+    outputs: &[OrtOwnedTensor<f32, IxDyn>],
+) -> Option<HashMap<usize, f32>> {
+    let mut scores_out: Option<&OrtOwnedTensor<f32, IxDyn>> = None;
+    let mut boxes_out: Option<&OrtOwnedTensor<f32, IxDyn>> = None;
+    for output in outputs {
+        let shape = output.shape();
+        if shape.len() == 3 && shape[2] == 2 {
+            scores_out = Some(output);
+        } else if shape.len() == 3 && shape[2] == 4 {
+            boxes_out = Some(output);
+        }
+    }
+    let scores_out = scores_out?;
+    let _boxes_out = boxes_out?;
+    let shape = scores_out.shape();
+    let Some(slice) = scores_out.as_slice() else {
+        return None;
+    };
+    let cols = shape[2] as usize;
+    if cols != 2 {
+        return None;
+    }
+    let mut scores: HashMap<usize, f32> = HashMap::new();
+    for row in slice.chunks_exact(cols) {
+        for (idx, raw) in row.iter().enumerate() {
+            if !raw.is_finite() {
+                continue;
+            }
+            let score = raw.max(0.0).min(1.0);
+            if score < DETECTION_MIN_SCORE {
+                continue;
+            }
+            let entry = scores.entry(idx).or_insert(0.0);
+            if score > *entry {
+                *entry = score;
+            }
+        }
+    }
+    Some(scores)
+}
+
+fn sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        let z = (-x).exp();
+        1.0 / (1.0 + z)
+    } else {
+        let z = x.exp();
+        z / (1.0 + z)
+    }
 }
 
 fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
