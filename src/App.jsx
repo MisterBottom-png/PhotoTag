@@ -61,12 +61,12 @@ function StarIcon({ filled }) {
       height="18"
       viewBox="0 0 24 24"
       fill={filled ? "url(#starGradient)" : "none"}
-      stroke={filled ? "none" : "#6b7a94"}
+      stroke={filled ? "none" : "var(--muted)"}
     >
       <defs>
         <linearGradient id="starGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#38bdf8" />
-          <stop offset="100%" stopColor="#22d3ee" />
+          <stop offset="0%" stopColor="var(--accent)" />
+          <stop offset="100%" stopColor="var(--accent-2)" />
         </linearGradient>
       </defs>
       <path
@@ -240,6 +240,7 @@ function EmptyState({ onImport, onClearFilters }) {
 
 export default function App() {
   const [mode, setMode] = usePersistentState("pt-mode", "CULL");
+  const [theme, setTheme] = usePersistentState("pt-theme", "dark");
   const [smartView, setSmartView] = useState("ALL");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [thumbSize, setThumbSize] = usePersistentState("pt-thumb-size", 190);
@@ -299,6 +300,10 @@ export default function App() {
     refreshPhotos({ resetCursor: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smartView, filters.sort_by, filters.search, mode]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -592,6 +597,18 @@ export default function App() {
           </div>
         </div>
         <div className="actions">
+          <div className="theme-toggle" role="group" aria-label="Theme">
+            {["dark", "light"].map((value) => (
+              <button
+                key={value}
+                className={theme === value ? "active" : ""}
+                onClick={() => setTheme(value)}
+                aria-pressed={theme === value}
+              >
+                {value === "dark" ? "Dark" : "Light"}
+              </button>
+            ))}
+          </div>
           <div className="search">
             <input
               ref={searchRef}

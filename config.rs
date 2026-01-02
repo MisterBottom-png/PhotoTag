@@ -12,6 +12,10 @@ pub struct TaggingConfig {
     pub suggestion_threshold: f32,
     pub portrait_min_area_ratio: f32,
     pub face_min_score: f32,
+    #[serde(default = "default_detection_confidence_threshold")]
+    pub detection_confidence_threshold: f32,
+    #[serde(default = "default_detection_iou_threshold")]
+    pub detection_iou_threshold: f32,
 }
 
 impl Default for TaggingConfig {
@@ -24,8 +28,18 @@ impl Default for TaggingConfig {
             suggestion_threshold: 0.50,
             portrait_min_area_ratio: 0.12,
             face_min_score: 0.75,
+            detection_confidence_threshold: 0.25,
+            detection_iou_threshold: 0.45,
         }
     }
+}
+
+fn default_detection_confidence_threshold() -> f32 {
+    0.25
+}
+
+fn default_detection_iou_threshold() -> f32 {
+    0.45
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

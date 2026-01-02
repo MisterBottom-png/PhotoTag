@@ -87,6 +87,18 @@ impl TaggingEngine {
         let scene_label_map = load_label_map(&scene_path);
         let detection_labels = load_labels_from_model(&detect_path);
         let detection_label_map = load_label_map(&detect_path);
+        if detection_labels.len() == 80 {
+            if detection_labels
+                .get(0)
+                .map(|s| s.as_str())
+                .unwrap_or_default()
+                != "person"
+            {
+                log::warn!(
+                    "Detection labels look non-COCO or misaligned: expected labels[0] == \"person\" for COCO-80."
+                );
+            }
+        }
 
         let scene_session = ORT_ENV
             .as_ref()
@@ -382,12 +394,16 @@ impl TaggingEngine {
         let session = self.detection_session.as_mut().unwrap();
         let (w, h) = model_input_hw(session, 640, 640);
         let img = image::open(preview_path)?;
-        let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
+        let rgb = img.to_rgb8();
+        let orig_w = rgb.width();
+        let orig_h = rgb.height();
+        // YOLOv5 expects letterboxed input; keep scale/padding to recover boxes.
+        let (letterboxed, ratio, dw, dh) = letterbox_rgb(&rgb, w, h, 114);
         let nchw = model_expects_nchw(session);
         let input = if nchw {
-            rgb8_to_nchw(&resized, w, h)
+            rgb8_to_nchw(&letterboxed, w, h)
         } else {
-            rgb8_to_nhwc(&resized)
+            rgb8_to_nhwc(&letterboxed)
         };
         let input_tensor = if nchw {
             Array::from_shape_vec((1, 3, h as usize, w as usize), input)
@@ -440,6 +456,56 @@ impl TaggingEngine {
                 let entry = tags.entry(label.to_string()).or_insert(0.0);
                 if score > *entry {
                     *entry = score;
+                }
+            }
+            return Ok(tags);
+        }
+        if let Some(detections) = yolov5_detections_from_outputs(
+            &outputs,
+            ratio,
+            dw,
+            dh,
+            orig_w,
+            orig_h,
+            self.config.detection_confidence_threshold,
+            self.config.detection_iou_threshold,
+        ) {
+            if let Some(top) = detections.first() {
+                let label = self
+                    .detection_labels
+                    .get(top.class_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                log::info!(
+                    "Top detection for {}: cls_id={} label={} score={:.2} box=[{:.1},{:.1},{:.1},{:.1}]",
+                    preview_path.display(),
+                    top.class_id,
+                    label,
+                    top.score,
+                    top.bbox[0],
+                    top.bbox[1],
+                    top.bbox[2],
+                    top.bbox[3]
+                );
+            }
+            let mut tags = HashMap::new();
+            for det in detections {
+                let label = match self.detection_labels.get(det.class_id) {
+                    Some(name) => name.as_str(),
+                    None => continue,
+                };
+                if !self.detection_label_map.is_empty() {
+                    apply_detection_label(&mut tags, &self.detection_label_map, label, det.score);
+                } else if let Some(tag) = default_detection_tag(label) {
+                    let entry = tags.entry(tag.to_string()).or_insert(0.0);
+                    if det.score > *entry {
+                        *entry = det.score;
+                    }
+                } else {
+                    let entry = tags.entry(label.to_string()).or_insert(0.0);
+                    if det.score > *entry {
+                        *entry = det.score;
+                    }
                 }
             }
             return Ok(tags);
@@ -889,6 +955,195 @@ fn default_detection_tag(label: &str) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct Detection {
+    class_id: usize,
+    score: f32,
+    bbox: [f32; 4],
+}
+
+fn yolov5_detections_from_outputs(
+    outputs: &[OrtOwnedTensor<f32, IxDyn>],
+    ratio: f32,
+    dw: f32,
+    dh: f32,
+    orig_w: u32,
+    orig_h: u32,
+    conf_thres: f32,
+    iou_thres: f32,
+) -> Option<Vec<Detection>> {
+    let mut raw = Vec::new();
+    let mut rows_opt = None;
+    for output in outputs {
+        if let Some(rows) = YoloRows::from_output(output) {
+            rows_opt = Some(rows);
+            break;
+        }
+    }
+    let rows = rows_opt?;
+    let class_count = rows.stride().saturating_sub(5);
+    if class_count == 0 || ratio <= 0.0 {
+        return None;
+    }
+    for row_idx in 0..rows.rows() {
+        let x = rows.value(row_idx, 0);
+        let y = rows.value(row_idx, 1);
+        let w = rows.value(row_idx, 2);
+        let h = rows.value(row_idx, 3);
+        let obj = sigmoid(rows.value(row_idx, 4));
+        if !x.is_finite()
+            || !y.is_finite()
+            || !w.is_finite()
+            || !h.is_finite()
+            || !obj.is_finite()
+        {
+            continue;
+        }
+        let mut best_id = 0usize;
+        let mut best_prob = 0.0f32;
+        for cls in 0..class_count {
+            let prob = sigmoid(rows.value(row_idx, 5 + cls));
+            if prob.is_finite() && prob > best_prob {
+                best_prob = prob;
+                best_id = cls;
+            }
+        }
+        let score = obj * best_prob;
+        if !score.is_finite() || score < conf_thres {
+            continue;
+        }
+        let half_w = w / 2.0;
+        let half_h = h / 2.0;
+        let mut x1 = (x - half_w - dw) / ratio;
+        let mut y1 = (y - half_h - dh) / ratio;
+        let mut x2 = (x + half_w - dw) / ratio;
+        let mut y2 = (y + half_h - dh) / ratio;
+        x1 = x1.max(0.0).min(orig_w as f32);
+        y1 = y1.max(0.0).min(orig_h as f32);
+        x2 = x2.max(0.0).min(orig_w as f32);
+        y2 = y2.max(0.0).min(orig_h as f32);
+        if x2 <= x1 || y2 <= y1 {
+            continue;
+        }
+        // Store boxes in original-image coords for NMS and tagging.
+        raw.push(Detection {
+            class_id: best_id,
+            score,
+            bbox: [x1, y1, x2, y2],
+        });
+    }
+    if raw.is_empty() {
+        return Some(Vec::new());
+    }
+    let kept = nms_class_aware(raw, iou_thres);
+    Some(kept)
+}
+
+fn nms_class_aware(mut dets: Vec<Detection>, iou_thres: f32) -> Vec<Detection> {
+    // Standard class-aware NMS over descending scores.
+    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut keep = Vec::new();
+    let mut suppressed = vec![false; dets.len()];
+    for i in 0..dets.len() {
+        if suppressed[i] {
+            continue;
+        }
+        keep.push(dets[i].clone());
+        for j in (i + 1)..dets.len() {
+            if suppressed[j] || dets[i].class_id != dets[j].class_id {
+                continue;
+            }
+            if iou(&dets[i].bbox, &dets[j].bbox) > iou_thres {
+                suppressed[j] = true;
+            }
+        }
+    }
+    keep
+}
+
+fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let inter_w = (x2 - x1).max(0.0);
+    let inter_h = (y2 - y1).max(0.0);
+    let inter = inter_w * inter_h;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let area_a = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
+    let area_b = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
+    if area_a <= 0.0 || area_b <= 0.0 {
+        return 0.0;
+    }
+    inter / (area_a + area_b - inter)
+}
+
+enum YoloRows<'a> {
+    RowMajor {
+        data: &'a [f32],
+        rows: usize,
+        stride: usize,
+    },
+    ChannelMajor {
+        data: &'a [f32],
+        rows: usize,
+        stride: usize,
+    },
+}
+
+impl<'a> YoloRows<'a> {
+    fn from_output(output: &'a OrtOwnedTensor<f32, IxDyn>) -> Option<Self> {
+        let shape = output.shape();
+        let data = output.as_slice()?;
+        if shape.len() == 3 {
+            let dim1 = shape[1] as usize;
+            let dim2 = shape[2] as usize;
+            if dim1 >= 6 && dim2 > dim1 && data.len() >= dim1 * dim2 {
+                return Some(Self::ChannelMajor {
+                    data,
+                    rows: dim2,
+                    stride: dim1,
+                });
+            }
+        }
+        if shape.len() >= 2 {
+            let stride = *shape.last()? as usize;
+            if stride >= 6 {
+                let rows = shape[..shape.len() - 1]
+                    .iter()
+                    .fold(1usize, |acc, d| acc.saturating_mul(*d as usize));
+                if data.len() >= rows * stride {
+                    return Some(Self::RowMajor { data, rows, stride });
+                }
+            }
+        }
+        None
+    }
+
+    fn rows(&self) -> usize {
+        match self {
+            Self::RowMajor { rows, .. } => *rows,
+            Self::ChannelMajor { rows, .. } => *rows,
+        }
+    }
+
+    fn stride(&self) -> usize {
+        match self {
+            Self::RowMajor { stride, .. } => *stride,
+            Self::ChannelMajor { stride, .. } => *stride,
+        }
+    }
+
+    fn value(&self, row: usize, idx: usize) -> f32 {
+        match self {
+            Self::RowMajor { data, stride, .. } => data[row * *stride + idx],
+            Self::ChannelMajor { data, rows, .. } => data[idx * *rows + row],
+        }
+    }
+}
+
 fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usize, f32> {
     let mut scores: HashMap<usize, f32> = HashMap::new();
     if outputs.len() == 2 {
@@ -1189,6 +1444,28 @@ fn rgb8_to_nchw(img: &image::RgbImage, w: u32, h: u32) -> Vec<f32> {
         input[idx + plane * 2] = pixel[2] as f32 / 255.0;
     }
     input
+}
+
+fn letterbox_rgb(
+    img: &image::RgbImage,
+    net_w: u32,
+    net_h: u32,
+    pad_val: u8,
+) -> (image::RgbImage, f32, f32, f32) {
+    let src_w = img.width().max(1);
+    let src_h = img.height().max(1);
+    let ratio = (net_w as f32 / src_w as f32).min(net_h as f32 / src_h as f32);
+    let new_w = ((src_w as f32) * ratio).round().max(1.0) as u32;
+    let new_h = ((src_h as f32) * ratio).round().max(1.0) as u32;
+    let resized = image::imageops::resize(img, new_w, new_h, FilterType::Triangle);
+    let mut padded = image::RgbImage::from_pixel(net_w, net_h, image::Rgb([pad_val; 3]));
+    let dw = (net_w as f32 - new_w as f32) / 2.0;
+    let dh = (net_h as f32 - new_h as f32) / 2.0;
+    let pad_left = dw.floor().max(0.0) as u32;
+    let pad_top = dh.floor().max(0.0) as u32;
+    // Pad to the requested net size with the YOLOv5 default background value.
+    image::imageops::replace(&mut padded, &resized, pad_left as i64, pad_top as i64);
+    (padded, ratio, pad_left as f32, pad_top as f32)
 }
 
 fn run_scene_logits(
