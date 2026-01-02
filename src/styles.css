@@ -478,130 +478,175 @@ select {
   min-height: 320px;
 }
 
-/* --- Culling View Strict Layout Fix --- */
-
-/* 1. Main Grid: Rigid structure */
+/* --- Culling experience --- */
 .cull-view {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) var(--filmstrip-height);
-  gap: 10px;
-  height: 100%;
-  width: 100%;
-  min-height: 0;
-  min-width: 0;     /* Allows shrinking */
-  overflow: hidden; /* Safety clip */
-}
-
-/* 2. Preview Container */
-.cull-preview {
-  background: rgba(12, 18, 34, 0.6);
-  border: 1px solid var(--stroke);
-  border-radius: 16px;
-  position: relative;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  gap: 12px;
+  height: 100%;
   min-height: 0;
-  overflow: hidden;
-  padding: 0;
 }
 
-/* 3. Stage: The reference point */
+.cull-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.preview-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(12, 18, 36, 0.9);
+  border: 1px solid rgba(47, 73, 140, 0.5);
+  border-radius: 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.preview-meta {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.preview-meta .file-name {
+  font-weight: 700;
+  font-size: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.preview-actions-right {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.preview-actions-right .active {
+  border-color: rgba(56, 189, 248, 0.8);
+  box-shadow: 0 10px 16px rgba(56, 189, 248, 0.2);
+}
+
+.preview-actions-right .reject {
+  border-color: rgba(239, 68, 68, 0.7);
+  background: rgba(239, 68, 68, 0.08);
+  color: #fecaca;
+}
+
+.preview-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.preview-chip {
+  background: rgba(95, 126, 227, 0.12);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(95, 126, 227, 0.4);
+  font-size: 12px;
+  letter-spacing: 0.2px;
+}
+
+.preview-chip.reject {
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #fecaca;
+}
+
 .preview-stage {
   position: relative;
   flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
+  min-height: clamp(320px, 48vh, 640px);
+  background: radial-gradient(600px 400px at 20% 10%, rgba(61, 210, 194, 0.08), transparent),
+    radial-gradient(600px 420px at 90% 0%, rgba(95, 126, 227, 0.08), transparent),
+    rgba(12, 18, 34, 0.8);
+  border: 1px solid rgba(38, 58, 96, 0.5);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
   overflow: hidden;
-}
-
-/* 4. Frame: Acts as the coordinate system (No Flexbox!) */
-.preview-frame {
-  position: absolute;
-  inset: 12px var(--preview-arrow-gutter);
   display: grid;
   place-items: center;
-  /* Removed display:flex to prevent layout blowout */
+  padding: 12px;
 }
 
-/* 5. The Image: Absolutely Centered & Constrained */
-.preview-large {
+.preview-frame {
   position: relative;
-  transform: none;
   width: 100%;
   height: 100%;
   max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  
-  background: #0c1528;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  display: grid;
+  place-items: center;
 }
 
-/* 6. Arrows: Pinned to the viewport edges */
+.preview-large {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #0c1528;
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
 .nav-arrow {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  width: 36px;
-  height: 36px;
-  z-index: 20;
-  
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  
+  width: 38px;
+  height: 38px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
   padding: 0;
   border-radius: 999px;
-  background: rgba(8, 14, 24, 0.85);
+  background: rgba(8, 14, 24, 0.82);
   color: var(--text);
-  border: 1px solid rgba(61, 210, 194, 0.45);
+  border: 1px solid rgba(61, 210, 194, 0.5);
   cursor: pointer;
   box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(6px);
 }
 
 .nav-arrow.prev {
-  left: 12px;
+  left: clamp(8px, 2vw, 16px);
 }
 
 .nav-arrow.next {
-  right: 12px;
+  right: clamp(8px, 2vw, 16px);
 }
 
 .nav-arrow:hover {
-  background: rgba(61, 210, 194, 0.15);
+  background: rgba(61, 210, 194, 0.18);
   border-color: var(--accent);
   color: #fff;
 }
 
-.cull-controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-  align-items: center;
-}
-
-.cull-buttons {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.cull-buttons .active {
-  border: 1px solid rgba(56, 189, 248, 0.8);
-}
-
-.cull-buttons .reject {
-  border-color: rgba(239, 68, 68, 0.7);
-  background: rgba(239, 68, 68, 0.1);
-  color: #fecaca;
-}
-
-.cull-nav {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+.preview-count {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: rgba(6, 10, 18, 0.78);
+  border: 1px solid rgba(95, 126, 227, 0.45);
+  color: #dfe7fb;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.3px;
 }
 
 .filmstrip-wrap {
@@ -615,8 +660,8 @@ select {
   gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 6px 40px;
-  background: rgba(12, 18, 36, 0.8);
+  padding: 8px 42px;
+  background: rgba(12, 18, 36, 0.9);
   border: 1px solid var(--stroke);
   border-radius: 14px;
   height: 100%;
@@ -639,13 +684,14 @@ select {
   padding: 0;
   line-height: 0;
   border-radius: 999px;
-  background: rgba(8, 14, 24, 0.75);
+  background: rgba(8, 14, 24, 0.8);
   color: var(--text);
-  border: 1px solid rgba(61, 210, 194, 0.45);
+  border: 1px solid rgba(61, 210, 194, 0.5);
   display: grid;
   place-items: center;
   font-size: 18px;
   z-index: 2;
+  box-shadow: var(--shadow-soft);
 }
 
 .nav-arrow svg,
@@ -654,11 +700,11 @@ select {
 }
 
 .strip-arrow.prev {
-  left: 6px;
+  left: 8px;
 }
 
 .strip-arrow.next {
-  right: 6px;
+  right: 8px;
 }
 
 .details .file-title {
@@ -980,6 +1026,16 @@ select {
     min-height: 0;
     overflow: hidden;
   }
+  .preview-bar {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+  }
+  .preview-actions {
+    justify-content: flex-start;
+  }
+  .preview-stage {
+    min-height: clamp(260px, 46vh, 520px);
+  }
   .panel {
     max-height: 38vh;
     overflow-y: auto;
@@ -1023,6 +1079,15 @@ select {
   }
   .cull-view {
     gap: 8px;
+  }
+  .preview-bar {
+    gap: 10px;
+  }
+  .preview-actions {
+    width: 100%;
+  }
+  .preview-stage {
+    min-height: clamp(220px, 42vh, 460px);
   }
   .panel {
     max-height: 45vh;

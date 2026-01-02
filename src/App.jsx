@@ -640,7 +640,43 @@ export default function App() {
           ) : mode === "CULL" ? (
             <div className="cull-view">
               <div className="cull-preview">
+                <div className="preview-bar">
+                  <div className="preview-meta">
+                    <div className="file-name" title={activePhoto?.photo.file_name}>
+                      {activePhoto?.photo.file_name}
+                    </div>
+                    <div className="muted truncate" title={activePhoto?.photo.path}>
+                      {activePhoto?.photo.path}
+                    </div>
+                  </div>
+                  <div className="preview-actions">
+                    <RatingStars
+                      value={activePhoto?.photo.rating || 0}
+                      onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
+                      compact
+                      showClear
+                    />
+                    <div className="preview-chips">
+                      {activePhoto?.photo.picked && <span className="preview-chip">Picked</span>}
+                      {activePhoto?.photo.rejected && <span className="preview-chip reject">Rejected</span>}
+                    </div>
+                    <div className="preview-actions-right">
+                      <button className={activePhoto?.photo.picked ? "ghost active" : "ghost"} onClick={togglePick}>
+                        Pick
+                      </button>
+                      <button
+                        className={activePhoto?.photo.rejected ? "ghost active reject" : "ghost"}
+                        onClick={toggleReject}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 <div className="preview-stage">
+                  <div className="preview-count">
+                    {cursorIndex + 1} / {photos.length}
+                  </div>
                   <div className="preview-frame">
                     <button className="nav-arrow prev" onClick={() => moveCursor(-1)} aria-label="Previous photo">
                       <ArrowIcon direction="left" />
