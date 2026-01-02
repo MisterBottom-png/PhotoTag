@@ -409,23 +409,31 @@ fn softmax(values: &[f32]) -> Vec<f32> {
     exps.iter().map(|e| e / sum).collect()
 }
 
-fn load_labels_from_model(model_path: &Path) -> Vec<String> {
-    let mut labels_path = model_path.with_extension("labels.txt");
-    if !labels_path.exists() {
-        if let Some(stem) = model_path.file_stem().and_then(|s| s.to_str()) {
-            let fallback = Path::new("models").join(format!("{stem}.labels.txt"));
-            if fallback.exists() {
-                labels_path = fallback;
-            }
+fn resolve_labels_path(model_path: &Path) -> Option<std::path::PathBuf> {
+    let labels_path = model_path.with_extension("labels.txt");
+    if labels_path.exists() {
+        return Some(labels_path);
+    }
+    if let Some(stem) = model_path.file_stem().and_then(|s| s.to_str()) {
+        let fallback = Path::new("models").join(format!("{stem}.labels.txt"));
+        if fallback.exists() {
+            return Some(fallback);
         }
     }
-    if !labels_path.exists() {
-        log::warn!(
-            "No labels sidecar found for scene model: {}",
-            labels_path.display()
-        );
-        return Vec::new();
-    }
+    None
+}
+
+fn load_labels_from_model(model_path: &Path) -> Vec<String> {
+    let labels_path = match resolve_labels_path(model_path) {
+        Some(path) => path,
+        None => {
+            log::warn!(
+                "No labels sidecar found for scene model: {}",
+                model_path.display()
+            );
+            return Vec::new();
+        }
+    };
     let contents = match std::fs::read_to_string(&labels_path) {
         Ok(data) => data,
         Err(err) => {
@@ -453,16 +461,41 @@ fn load_labels_from_model(model_path: &Path) -> Vec<String> {
 }
 
 fn load_label_map(model_path: &Path) -> HashMap<String, Vec<String>> {
+    let mut tried: Vec<std::path::PathBuf> = Vec::new();
     let mut map_path = model_path.with_extension("tags.txt");
+    tried.push(map_path.clone());
+    if !map_path.exists() {
+        if let Some(labels_path) = resolve_labels_path(model_path) {
+            if let Some(name) = labels_path.file_name().and_then(|n| n.to_str()) {
+                if let Some(stem) = name.strip_suffix(".labels.txt") {
+                    let candidate =
+                        labels_path.with_file_name(format!("{stem}.tags.txt"));
+                    tried.push(candidate.clone());
+                    if candidate.exists() {
+                        map_path = candidate;
+                    }
+                }
+            }
+        }
+    }
     if !map_path.exists() {
         if let Some(stem) = model_path.file_stem().and_then(|s| s.to_str()) {
             let fallback = Path::new("models").join(format!("{stem}.tags.txt"));
+            tried.push(fallback.clone());
             if fallback.exists() {
                 map_path = fallback;
             }
         }
     }
     if !map_path.exists() {
+        if !tried.is_empty() {
+            let tried_list = tried
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            log::warn!("No tag map found; tried: {tried_list}");
+        }
         return HashMap::new();
     }
     let contents = match std::fs::read_to_string(&map_path) {
