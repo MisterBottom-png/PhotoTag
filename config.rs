@@ -7,9 +7,11 @@ use tauri::{Config, Env, PackageInfo};
 pub struct TaggingConfig {
     pub scene_model_path: PathBuf,
     pub detection_model_path: PathBuf,
+    pub face_model_path: PathBuf,
     pub confidence_threshold: f32,
     pub suggestion_threshold: f32,
     pub portrait_min_area_ratio: f32,
+    pub face_min_score: f32,
 }
 
 impl Default for TaggingConfig {
@@ -17,9 +19,11 @@ impl Default for TaggingConfig {
         Self {
             scene_model_path: PathBuf::from("scene_classifier.onnx"),
             detection_model_path: PathBuf::from("person_detector.onnx"),
+            face_model_path: PathBuf::from("face_detector.onnx"),
             confidence_threshold: 0.65,
             suggestion_threshold: 0.45,
             portrait_min_area_ratio: 0.10,
+            face_min_score: 0.70,
         }
     }
 }

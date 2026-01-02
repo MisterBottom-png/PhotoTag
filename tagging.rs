@@ -4,7 +4,10 @@ use crate::models::{ExifMetadata, TaggingResult};
 use image::imageops::FilterType;
 use lazy_static::lazy_static;
 use onnxruntime::{
-    environment::Environment, ndarray::Array, session::Session, tensor::OrtOwnedTensor,
+    environment::Environment,
+    ndarray::{Array, IxDyn},
+    session::Session,
+    tensor::OrtOwnedTensor,
     GraphOptimizationLevel, LoggingLevel,
 };
 use std::collections::HashMap;
@@ -25,6 +28,7 @@ lazy_static! {
 pub struct TaggingEngine {
     scene_session: Option<Session<'static>>,
     detection_session: Option<Session<'static>>,
+    face_session: Option<Session<'static>>,
     config: TaggingConfig,
     onnx_enabled: bool,
 }
@@ -37,6 +41,7 @@ impl TaggingEngine {
             return Ok(Self {
                 scene_session: None,
                 detection_session: None,
+                face_session: None,
                 config,
                 onnx_enabled: false,
             });
@@ -44,17 +49,23 @@ impl TaggingEngine {
 
         let scene_path = config.scene_model_path.clone();
         let detect_path = config.detection_model_path.clone();
+        let face_path = config.face_model_path.clone();
         if !scene_path.exists() {
             log::warn!("Scene model not found: {}", scene_path.display());
         }
         if !detect_path.exists() {
             log::warn!("Detection model not found: {}", detect_path.display());
         }
+        if !face_path.exists() {
+            log::warn!("Face model not found: {}", face_path.display());
+        }
 
         let scene_model_path: &'static Path =
             Box::leak(config.scene_model_path.clone().into_boxed_path());
         let detection_model_path: &'static Path =
             Box::leak(config.detection_model_path.clone().into_boxed_path());
+        let face_model_path: &'static Path =
+            Box::leak(config.face_model_path.clone().into_boxed_path());
 
         let scene_session = ORT_ENV
             .as_ref()
@@ -65,6 +76,10 @@ impl TaggingEngine {
             .as_ref()
             .copied()
             .and_then(|env| safe_session(env, detection_model_path, "detection"));
+        let face_session = ORT_ENV
+            .as_ref()
+            .copied()
+            .and_then(|env| safe_session(env, face_model_path, "face"));
         if scene_session.is_some() {
             log::info!("Loaded scene model: {}", scene_path.display());
         } else {
@@ -75,11 +90,18 @@ impl TaggingEngine {
         } else {
             log::warn!("Failed to load detection model: {}", detect_path.display());
         }
+        if face_session.is_some() {
+            log::info!("Loaded face model: {}", face_path.display());
+        } else {
+            log::warn!("Failed to load face model: {}", face_path.display());
+        }
 
-        let onnx_enabled = scene_session.is_some() || detection_session.is_some();
+        let onnx_enabled =
+            scene_session.is_some() || detection_session.is_some() || face_session.is_some();
         Ok(Self {
             scene_session,
             detection_session,
+            face_session,
             config,
             onnx_enabled,
         })
@@ -88,6 +110,7 @@ impl TaggingEngine {
     pub fn disable_onnx(&mut self) {
         self.scene_session = None;
         self.detection_session = None;
+        self.face_session = None;
         self.onnx_enabled = false;
         log::warn!("ONNX disabled after runtime failure; continuing with heuristics only.");
     }
@@ -105,7 +128,7 @@ impl TaggingEngine {
             Ok(score) => score,
             Err(err) => {
                 log::warn!(
-                    "Detection model failed for {}: {}",
+                    "Face model failed for {}: {}",
                     preview_path.display(),
                     err
                 );
@@ -179,10 +202,23 @@ impl TaggingEngine {
     }
 
     fn run_portrait(&mut self, preview_path: &Path, exif: &ExifMetadata) -> Result<f32> {
-        if self.detection_session.is_none() {
+        let face_score = self.run_face(preview_path)?;
+        if face_score <= 0.0 {
             return Ok(0.0);
         }
-        let session = self.detection_session.as_mut().unwrap();
+        let focal_boost = exif
+            .focal_length
+            .map(|f| if f > 70.0 { 0.1 } else { 0.0 })
+            .unwrap_or(0.0);
+        let score = (face_score + focal_boost).min(1.0).max(0.0);
+        Ok(score)
+    }
+
+    fn run_face(&mut self, preview_path: &Path) -> Result<f32> {
+        if self.face_session.is_none() {
+            return Ok(0.0);
+        }
+        let session = self.face_session.as_mut().unwrap();
         let (w, h) = model_input_hw(session, 224, 224);
         let img = image::open(preview_path)?;
         let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
@@ -200,34 +236,22 @@ impl TaggingEngine {
         .map_err(|e| Error::Init(format!("Invalid detector tensor shape: {e}")))?;
         let outputs: Vec<OrtOwnedTensor<f32, _>> = session
             .run(vec![input_tensor])
-            .map_err(|e| Error::Init(format!("Failed to run detector: {e}")))?;
+            .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?;
         if outputs.is_empty() {
             log::warn!(
-                "Detection model returned no outputs for {}",
+                "Face model returned no outputs for {}",
                 preview_path.display()
             );
         }
-        let scores = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
-        let max_score = scores
-            .iter()
-            .cloned()
-            .fold(f32::MIN, f32::max)
-            .max(0.0)
-            .min(1.0);
+        let max_score = max_face_score(&outputs).unwrap_or(0.0).max(0.0).min(1.0);
         log::info!(
-            "Detection score for {}: {:.4} (threshold {:.4})",
+            "Face score for {}: {:.4} (threshold {:.4})",
             preview_path.display(),
             max_score,
-            self.config.portrait_min_area_ratio
+            self.config.face_min_score
         );
-
-        let focal_boost = exif
-            .focal_length
-            .map(|f| if f > 70.0 { 0.1 } else { 0.0 })
-            .unwrap_or(0.0);
-        let score = (max_score + focal_boost).min(1.0).max(0.0);
-        if score >= self.config.portrait_min_area_ratio {
-            Ok(score)
+        if max_score >= self.config.face_min_score {
+            Ok(max_score)
         } else {
             Ok(0.0)
         }
@@ -312,6 +336,25 @@ fn softmax_first_n(values: &[f32], n: usize) -> Vec<f32> {
         return vec![0.0; slice.len()];
     }
     exps.iter().map(|e| e / sum).collect()
+}
+
+fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
+    let mut best = None;
+    for output in outputs {
+        let shape = output.shape();
+        if shape.len() >= 2 && shape[shape.len() - 1] == 2 {
+            if let Some(slice) = output.as_slice() {
+                for pair in slice.chunks_exact(2) {
+                    let score = pair[1];
+                    if !score.is_finite() {
+                        continue;
+                    }
+                    best = Some(best.map_or(score, |b| b.max(score)));
+                }
+            }
+        }
+    }
+    best
 }
 
 fn rgb32f_to_nhwc(img: &image::Rgb32FImage) -> Vec<f32> {

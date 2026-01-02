@@ -790,6 +790,11 @@ select {
   box-shadow: var(--shadow-soft);
 }
 
+.strip-arrow:hover,
+.strip-arrow:focus-visible {
+  transform: translateY(-50%);
+}
+
 .nav-arrow svg,
 .strip-arrow svg {
   display: block;

@@ -178,6 +178,7 @@ fn main() {
     let mut tagging = TaggingConfig::default();
     tagging.scene_model_path = paths.resolve_model(&tagging.scene_model_path);
     tagging.detection_model_path = paths.resolve_model(&tagging.detection_model_path);
+    tagging.face_model_path = paths.resolve_model(&tagging.face_model_path);
     let db_pool = db::init_database(&paths).expect("Failed to initialize database");
 
     tauri::Builder::default()
