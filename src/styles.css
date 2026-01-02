@@ -697,6 +697,7 @@ select {
   gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
+  scrollbar-gutter: stable;
   padding: 12px 42px;
   background: rgba(12, 18, 36, 0.9);
   border: 1px solid var(--stroke);
