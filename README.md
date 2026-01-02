@@ -101,3 +101,21 @@ The auto-tagging system uses the scene model's labels as tags. To add or rename 
 Manual tags can always be added directly through the UI without any code changes.
 
 Manual tags can always be added directly through the UI without any code changes.
+
+### Mapping ImageNet Labels to Meaningful Tags
+
+If you are using an ImageNet classifier (e.g., `mobilenet_v2_100`), the raw labels are very specific and often not meaningful as photo tags. You can provide a mapping file to translate those labels into your own tag vocabulary.
+
+Create `models/scene_classifier.tags.txt` (or `<model_name>.tags.txt`) with one mapping per line:
+
+```text
+cat: tabby, tiger cat, egyptian cat, siamese cat
+dog: golden retriever, labrador retriever, beagle
+bird: robin, jay, goldfinch, flamingo
+food: pizza, cheeseburger, burrito, ice cream
+```
+
+Notes:
+* The tag name is on the left; labels are comma-separated on the right.
+* Labels are normalized (lowercase, commas trimmed). Use the label names from `scene_classifier.labels.txt` (the part before any comma).
+* When a tag map is present, only mapped tags are emitted, so make sure to cover the labels you care about.

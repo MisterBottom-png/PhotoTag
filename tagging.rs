@@ -32,6 +32,7 @@ pub struct TaggingEngine {
     config: TaggingConfig,
     onnx_enabled: bool,
     scene_labels: Vec<String>,
+    scene_label_map: HashMap<String, Vec<String>>,
 }
 
 impl TaggingEngine {
@@ -55,6 +56,7 @@ impl TaggingEngine {
                 config,
                 onnx_enabled: false,
                 scene_labels: Vec::new(),
+                scene_label_map: HashMap::new(),
             });
         }
 
@@ -78,6 +80,7 @@ impl TaggingEngine {
         let face_model_path: &'static Path =
             Box::leak(config.face_model_path.clone().into_boxed_path());
         let scene_labels = load_labels_from_model(&scene_path);
+        let scene_label_map = load_label_map(&scene_path);
 
         let scene_session = ORT_ENV
             .as_ref()
@@ -117,6 +120,7 @@ impl TaggingEngine {
             config,
             onnx_enabled,
             scene_labels,
+            scene_label_map,
         })
     }
 
@@ -178,28 +182,25 @@ impl TaggingEngine {
         let img = image::open(preview_path)?;
         let resized = img.resize_exact(w, h, FilterType::Triangle).to_rgb32f();
         let nchw = model_expects_nchw(session);
-        let input = if nchw {
-            rgb32f_to_nchw(&resized, w, h)
-        } else {
-            rgb32f_to_nhwc(&resized)
-        };
-        let input_tensor = if nchw {
-            Array::from_shape_vec((1, 3, h as usize, w as usize), input)
-        } else {
-            Array::from_shape_vec((1, h as usize, w as usize, 3), input)
+        let mut best_mode = ScenePreprocess::Imagenet;
+        let mut logits = run_scene_logits(session, &resized, nchw, w, h, best_mode)?;
+        let mut best_top1 = top1_prob(&logits);
+        for mode in [ScenePreprocess::Raw01, ScenePreprocess::TfMinus1] {
+            let candidate = run_scene_logits(session, &resized, nchw, w, h, mode)?;
+            let top1 = top1_prob(&candidate);
+            if top1 > best_top1 {
+                best_top1 = top1;
+                best_mode = mode;
+                logits = candidate;
+            }
         }
-        .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .run(vec![input_tensor])
-            .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
-
-        if outputs.is_empty() {
-            log::warn!(
-                "Scene model returned no outputs for {}",
+        if best_mode != ScenePreprocess::Imagenet {
+            log::info!(
+                "Scene model used {best_mode:?} input (top1 {:.2}) for {}",
+                best_top1,
                 preview_path.display()
             );
         }
-        let logits = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
         let mut map = HashMap::new();
         if !logits.is_empty() {
             if !self.scene_labels.is_empty() {
@@ -212,11 +213,12 @@ impl TaggingEngine {
                     .collect();
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+                let mut processed = std::collections::HashSet::new();
                 let mut added = 0usize;
                 for (label, prob) in scored.iter() {
                     if *prob >= self.config.confidence_threshold {
-                        map.insert(label.clone(), *prob);
-                        added += 1;
+                        processed.insert(label.clone());
+                        added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
                         if added >= MAX_SCENE_TAGS {
                             break;
                         }
@@ -224,21 +226,26 @@ impl TaggingEngine {
                 }
                 if added < MAX_SCENE_TAGS {
                     for (label, prob) in scored.iter() {
-                        if map.contains_key(label) {
+                        if processed.contains(label) {
                             continue;
                         }
                         if *prob >= self.config.suggestion_threshold {
-                            map.insert(label.clone(), *prob);
-                            added += 1;
+                            processed.insert(label.clone());
+                            added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
                             if added >= MAX_SCENE_TAGS {
                                 break;
                             }
                         }
                     }
                 }
+                if added == 0 {
+                    for (label, prob) in scored.iter().take(MAX_SCENE_TAGS) {
+                        added += apply_scene_label(&mut map, &self.scene_label_map, label, *prob);
+                    }
+                }
             } else {
                 // Fallback for legacy fixed tags when no labels sidecar exists.
-                let probs = softmax_first_n(logits, 3);
+                let probs = softmax_first_n(&logits, 3);
                 map.insert("street".into(), probs.get(0).copied().unwrap_or(0.0));
                 map.insert("landscape".into(), probs.get(1).copied().unwrap_or(0.0));
                 map.insert("nature".into(), probs.get(2).copied().unwrap_or(0.0));
@@ -445,6 +452,56 @@ fn load_labels_from_model(model_path: &Path) -> Vec<String> {
     labels
 }
 
+fn load_label_map(model_path: &Path) -> HashMap<String, Vec<String>> {
+    let mut map_path = model_path.with_extension("tags.txt");
+    if !map_path.exists() {
+        if let Some(stem) = model_path.file_stem().and_then(|s| s.to_str()) {
+            let fallback = Path::new("models").join(format!("{stem}.tags.txt"));
+            if fallback.exists() {
+                map_path = fallback;
+            }
+        }
+    }
+    if !map_path.exists() {
+        return HashMap::new();
+    }
+    let contents = match std::fs::read_to_string(&map_path) {
+        Ok(data) => data,
+        Err(err) => {
+            log::warn!(
+                "Failed to read tag map from {}: {}",
+                map_path.display(),
+                err
+            );
+            return HashMap::new();
+        }
+    };
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (tag, rest) = match line.split_once(':') {
+            Some(pair) => pair,
+            None => match line.split_once('=') {
+                Some(pair) => pair,
+                None => continue,
+            },
+        };
+        let tag = tag.trim().to_lowercase();
+        if tag.is_empty() {
+            continue;
+        }
+        for raw in rest.split(',') {
+            if let Some(label) = normalize_label(raw) {
+                map.entry(label).or_insert_with(Vec::new).push(tag.clone());
+            }
+        }
+    }
+    map
+}
+
 fn normalize_label(line: &str) -> Option<String> {
     let mut label = line.trim();
     if label.is_empty() {
@@ -473,6 +530,56 @@ fn normalize_label(line: &str) -> Option<String> {
 }
 
 const MAX_SCENE_TAGS: usize = 5;
+const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ScenePreprocess {
+    Imagenet,
+    Raw01,
+    TfMinus1,
+}
+
+fn apply_scene_label(
+    map: &mut HashMap<String, f32>,
+    label_map: &HashMap<String, Vec<String>>,
+    label: &str,
+    score: f32,
+) -> usize {
+    if label_map.is_empty() {
+        return match map.entry(label.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(score);
+                1
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if score > *entry.get() {
+                    entry.insert(score);
+                }
+                0
+            }
+        };
+    }
+
+    if let Some(tags) = label_map.get(label) {
+        let mut added = 0usize;
+        for tag in tags {
+            match map.entry(tag.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(score);
+                    added += 1;
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if score > *entry.get() {
+                        entry.insert(score);
+                    }
+                }
+            }
+        }
+        return added;
+    }
+    0
+}
 
 fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
     let mut best = None;
@@ -535,6 +642,54 @@ fn rgb32f_to_nchw(img: &image::Rgb32FImage, w: u32, h: u32) -> Vec<f32> {
     input
 }
 
+fn rgb32f_to_nhwc_normalized(img: &image::Rgb32FImage) -> Vec<f32> {
+    let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    for pixel in img.pixels() {
+        input.extend_from_slice(&[
+            (pixel[0] - IMAGENET_MEAN[0]) / IMAGENET_STD[0],
+            (pixel[1] - IMAGENET_MEAN[1]) / IMAGENET_STD[1],
+            (pixel[2] - IMAGENET_MEAN[2]) / IMAGENET_STD[2],
+        ]);
+    }
+    input
+}
+
+fn rgb32f_to_nchw_normalized(img: &image::Rgb32FImage, w: u32, h: u32) -> Vec<f32> {
+    let plane = (w * h) as usize;
+    let mut input = vec![0.0; plane * 3];
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        input[idx] = (pixel[0] - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+        input[idx + plane] = (pixel[1] - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+        input[idx + plane * 2] = (pixel[2] - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+    }
+    input
+}
+
+fn rgb32f_to_nhwc_tf(img: &image::Rgb32FImage) -> Vec<f32> {
+    let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    for pixel in img.pixels() {
+        input.extend_from_slice(&[
+            (pixel[0] * 2.0) - 1.0,
+            (pixel[1] * 2.0) - 1.0,
+            (pixel[2] * 2.0) - 1.0,
+        ]);
+    }
+    input
+}
+
+fn rgb32f_to_nchw_tf(img: &image::Rgb32FImage, w: u32, h: u32) -> Vec<f32> {
+    let plane = (w * h) as usize;
+    let mut input = vec![0.0; plane * 3];
+    for (x, y, pixel) in img.enumerate_pixels() {
+        let idx = (y * w + x) as usize;
+        input[idx] = (pixel[0] * 2.0) - 1.0;
+        input[idx + plane] = (pixel[1] * 2.0) - 1.0;
+        input[idx + plane * 2] = (pixel[2] * 2.0) - 1.0;
+    }
+    input
+}
+
 fn rgb8_to_nhwc(img: &image::RgbImage) -> Vec<f32> {
     let mut input: Vec<f32> = Vec::with_capacity((img.width() * img.height() * 3) as usize);
     for pixel in img.pixels() {
@@ -557,6 +712,57 @@ fn rgb8_to_nchw(img: &image::RgbImage, w: u32, h: u32) -> Vec<f32> {
         input[idx + plane * 2] = pixel[2] as f32 / 255.0;
     }
     input
+}
+
+fn run_scene_logits(
+    session: &mut Session<'_>,
+    resized: &image::Rgb32FImage,
+    nchw: bool,
+    w: u32,
+    h: u32,
+    mode: ScenePreprocess,
+) -> Result<Vec<f32>> {
+    let input = match (mode, nchw) {
+        (ScenePreprocess::Imagenet, true) => rgb32f_to_nchw_normalized(resized, w, h),
+        (ScenePreprocess::Imagenet, false) => rgb32f_to_nhwc_normalized(resized),
+        (ScenePreprocess::Raw01, true) => rgb32f_to_nchw(resized, w, h),
+        (ScenePreprocess::Raw01, false) => rgb32f_to_nhwc(resized),
+        (ScenePreprocess::TfMinus1, true) => rgb32f_to_nchw_tf(resized, w, h),
+        (ScenePreprocess::TfMinus1, false) => rgb32f_to_nhwc_tf(resized),
+    };
+    let input_tensor = if nchw {
+        Array::from_shape_vec((1, 3, h as usize, w as usize), input)
+    } else {
+        Array::from_shape_vec((1, h as usize, w as usize, 3), input)
+    }
+    .map_err(|e| Error::Init(format!("Invalid scene tensor shape: {e}")))?;
+    let outputs: Vec<OrtOwnedTensor<f32, _>> = session
+        .run(vec![input_tensor])
+        .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
+    if outputs.is_empty() {
+        log::warn!("Scene model returned no outputs");
+        return Ok(Vec::new());
+    }
+    Ok(outputs
+        .get(0)
+        .and_then(|t| t.as_slice())
+        .unwrap_or(&[])
+        .to_vec())
+}
+
+fn top1_prob(logits: &[f32]) -> f32 {
+    if logits.is_empty() {
+        return 0.0;
+    }
+    let max_val = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0;
+    for v in logits {
+        sum += (v - max_val).exp();
+    }
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    1.0 / sum
 }
 
 fn safe_session(
