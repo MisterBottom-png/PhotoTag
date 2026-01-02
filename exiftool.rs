@@ -40,9 +40,12 @@ pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata>
         .or_else(|| get_string(&entry, "LensInfo"))
         .or_else(|| get_string(&entry, "LensMake"));
 
+    let make = get_string(&entry, "Make");
+    let model = normalize_model(&make, get_string(&entry, "Model"));
+
     Ok(ExifMetadata {
-        make: get_string(&entry, "Make"),
-        model: get_string(&entry, "Model"),
+        make,
+        model,
         lens: lens_value,
         body_serial: get_string(&entry, "BodySerialNumber"),
         datetime_original: parse_datetime_value(&entry, "DateTimeOriginal")
@@ -58,6 +61,42 @@ pub fn read_metadata(paths: &AppPaths, file_path: &Path) -> Result<ExifMetadata>
         width: get_i64(&entry, "ImageWidth"),
         height: get_i64(&entry, "ImageHeight"),
     })
+}
+
+fn normalize_model(make: &Option<String>, model: Option<String>) -> Option<String> {
+    let model = model?;
+    let model_trim = model.trim();
+    if model_trim.is_empty() {
+        return None;
+    }
+    let Some(make) = make.as_ref() else {
+        return Some(model_trim.to_string());
+    };
+    let make_trim = make.trim();
+    if make_trim.is_empty() {
+        return Some(model_trim.to_string());
+    }
+
+    let make_lc = make_trim.to_ascii_lowercase();
+    let model_lc = model_trim.to_ascii_lowercase();
+    if model_lc.starts_with(&make_lc) {
+        let remainder = &model_trim[make_trim.len()..];
+        let mut chars = remainder.chars();
+        match chars.next() {
+            None => return Some(model_trim.to_string()),
+            Some(c) if c.is_whitespace() || c == '-' || c == '_' || c == '/' => {
+                let cleaned = remainder
+                    .trim_start_matches(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '/');
+                if cleaned.is_empty() {
+                    return Some(model_trim.to_string());
+                }
+                return Some(cleaned.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Some(model_trim.to_string())
 }
 
 fn parse_datetime_value(entry: &Value, key: &str) -> Option<i64> {
