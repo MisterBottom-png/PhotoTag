@@ -403,7 +403,15 @@ fn softmax(values: &[f32]) -> Vec<f32> {
 }
 
 fn load_labels_from_model(model_path: &Path) -> Vec<String> {
-    let labels_path = model_path.with_extension("labels.txt");
+    let mut labels_path = model_path.with_extension("labels.txt");
+    if !labels_path.exists() {
+        if let Some(stem) = model_path.file_stem().and_then(|s| s.to_str()) {
+            let fallback = Path::new("models").join(format!("{stem}.labels.txt"));
+            if fallback.exists() {
+                labels_path = fallback;
+            }
+        }
+    }
     if !labels_path.exists() {
         log::warn!(
             "No labels sidecar found for scene model: {}",
