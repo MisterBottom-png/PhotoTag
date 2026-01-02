@@ -141,15 +141,22 @@ pub fn extract_preview(paths: &AppPaths, file_path: &Path, out_path: &Path) -> R
     let exe = paths.resolve_bin("exiftool.exe");
     let tags = ["PreviewImage", "JpgFromRaw", "BigImage", "ThumbnailImage"];
     for tag in tags {
+        if out_path.exists() {
+            let _ = std::fs::remove_file(out_path);
+        }
         let output = Command::new(&exe)
-            .args(["-b", tag])
+            .args(["-b", tag, "-o"])
+            .arg(out_path)
             .arg(file_path)
             .output()
             .map_err(|e| Error::Init(format!("Failed to execute ExifTool: {e}")))?;
 
-        if output.status.success() && !output.stdout.is_empty() {
-            std::fs::write(out_path, &output.stdout)?;
-            return Ok(out_path.exists());
+        if output.status.success() && out_path.exists() {
+            if let Ok(meta) = std::fs::metadata(out_path) {
+                if meta.len() > 0 {
+                    return Ok(true);
+                }
+            }
         }
     }
 
