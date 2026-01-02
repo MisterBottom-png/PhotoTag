@@ -31,6 +31,7 @@ pub struct TaggingEngine {
     face_session: Option<Session<'static>>,
     config: TaggingConfig,
     onnx_enabled: bool,
+    scene_labels: Vec<String>,
 }
 
 impl TaggingEngine {
@@ -44,6 +45,7 @@ impl TaggingEngine {
                 face_session: None,
                 config,
                 onnx_enabled: false,
+                scene_labels: Vec::new(),
             });
         }
 
@@ -66,6 +68,7 @@ impl TaggingEngine {
             Box::leak(config.detection_model_path.clone().into_boxed_path());
         let face_model_path: &'static Path =
             Box::leak(config.face_model_path.clone().into_boxed_path());
+        let scene_labels = load_labels_from_model(&scene_path);
 
         let scene_session = ORT_ENV
             .as_ref()
@@ -104,6 +107,7 @@ impl TaggingEngine {
             face_session,
             config,
             onnx_enabled,
+            scene_labels,
         })
     }
 
@@ -136,17 +140,14 @@ impl TaggingEngine {
             }
         };
 
-        if let Some(street) = scene_probs.get("street") {
-            tags.insert("street".into(), *street);
-        }
-        if let Some(landscape) = scene_probs.get("landscape") {
-            tags.insert("landscape".into(), *landscape);
-        }
-        if let Some(nature) = scene_probs.get("nature") {
-            tags.insert("nature".into(), *nature);
+        for (tag, score) in scene_probs {
+            tags.insert(tag, score);
         }
         if portrait_score > 0.0 {
-            tags.insert("portrait".into(), portrait_score);
+            let entry = tags.entry("portrait".into()).or_insert(0.0);
+            if portrait_score > *entry {
+                *entry = portrait_score;
+            }
         }
         if tags.is_empty() && !self.onnx_enabled {
             tags.extend(self.heuristic_tags(preview_path, exif));
@@ -190,13 +191,49 @@ impl TaggingEngine {
             );
         }
         let logits = outputs.get(0).and_then(|t| t.as_slice()).unwrap_or(&[]);
-        // simple mapping: assume first few indices map to our labels; in practice user should update mapping
         let mut map = HashMap::new();
         if !logits.is_empty() {
-            let probs = softmax_first_n(logits, 3);
-            map.insert("street".into(), probs.get(0).copied().unwrap_or(0.0));
-            map.insert("landscape".into(), probs.get(1).copied().unwrap_or(0.0));
-            map.insert("nature".into(), probs.get(2).copied().unwrap_or(0.0));
+            if !self.scene_labels.is_empty() {
+                let max_labels = logits.len().min(self.scene_labels.len());
+                let probs = softmax(&logits[..max_labels]);
+                let mut scored: Vec<(String, f32)> = self.scene_labels[..max_labels]
+                    .iter()
+                    .cloned()
+                    .zip(probs.into_iter())
+                    .collect();
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let mut added = 0usize;
+                for (label, prob) in scored.iter() {
+                    if *prob >= self.config.confidence_threshold {
+                        map.insert(label.clone(), *prob);
+                        added += 1;
+                        if added >= MAX_SCENE_TAGS {
+                            break;
+                        }
+                    }
+                }
+                if added < MAX_SCENE_TAGS {
+                    for (label, prob) in scored.iter() {
+                        if map.contains_key(label) {
+                            continue;
+                        }
+                        if *prob >= self.config.suggestion_threshold {
+                            map.insert(label.clone(), *prob);
+                            added += 1;
+                            if added >= MAX_SCENE_TAGS {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fallback for legacy fixed tags when no labels sidecar exists.
+                let probs = softmax_first_n(logits, 3);
+                map.insert("street".into(), probs.get(0).copied().unwrap_or(0.0));
+                map.insert("landscape".into(), probs.get(1).copied().unwrap_or(0.0));
+                map.insert("nature".into(), probs.get(2).copied().unwrap_or(0.0));
+            }
         }
         Ok(map)
     }
@@ -338,6 +375,88 @@ fn softmax_first_n(values: &[f32], n: usize) -> Vec<f32> {
     exps.iter().map(|e| e / sum).collect()
 }
 
+fn softmax(values: &[f32]) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let max_val = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut exps = Vec::with_capacity(values.len());
+    let mut sum = 0.0;
+    for v in values {
+        let e = (v - max_val).exp();
+        exps.push(e);
+        sum += e;
+    }
+    if sum <= 0.0 {
+        return vec![0.0; values.len()];
+    }
+    exps.iter().map(|e| e / sum).collect()
+}
+
+fn load_labels_from_model(model_path: &Path) -> Vec<String> {
+    let labels_path = model_path.with_extension("labels.txt");
+    if !labels_path.exists() {
+        log::warn!(
+            "No labels sidecar found for scene model: {}",
+            labels_path.display()
+        );
+        return Vec::new();
+    }
+    let contents = match std::fs::read_to_string(&labels_path) {
+        Ok(data) => data,
+        Err(err) => {
+            log::warn!(
+                "Failed to read labels from {}: {}",
+                labels_path.display(),
+                err
+            );
+            return Vec::new();
+        }
+    };
+    let mut labels = Vec::new();
+    for line in contents.lines() {
+        if let Some(label) = normalize_label(line) {
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        log::warn!(
+            "Labels file is empty or invalid: {}",
+            labels_path.display()
+        );
+    }
+    labels
+}
+
+fn normalize_label(line: &str) -> Option<String> {
+    let mut label = line.trim();
+    if label.is_empty() {
+        return None;
+    }
+    if let Some((prefix, rest)) = label.split_once(':') {
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+            label = rest.trim();
+        }
+    } else {
+        let mut parts = label.splitn(2, char::is_whitespace);
+        let first = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("");
+        if !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+            label = rest.trim();
+        }
+    }
+    if let Some((head, _)) = label.split_once(',') {
+        label = head.trim();
+    }
+    label = label.trim_matches('"').trim_matches('\'');
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.to_lowercase())
+}
+
+const MAX_SCENE_TAGS: usize = 5;
+
 fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
     let mut best = None;
     for output in outputs {
@@ -467,7 +586,7 @@ mod tests {
     fn fallback_scene_uses_filename() {
         let mut engine = TaggingEngine::new(TaggingConfig::default()).unwrap();
         let dummy = PathBuf::from("street_sample.jpg");
-        let res = engine.run_scene(&dummy).unwrap();
+        let res = engine.heuristic_tags(&dummy, &ExifMetadata::default());
         assert!(res.get("street").copied().unwrap_or(0.0) > 0.0);
     }
 

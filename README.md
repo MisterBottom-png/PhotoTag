@@ -41,7 +41,8 @@ This application relies on external binaries and machine learning models that mu
 * **Setup**:
   1. Create a `models` directory at the project root.
   2. Place your downloaded `.onnx` files into this `models/` directory.
-  3. Update the `config.rs` file with the correct model filenames or adjust `TaggingConfig` accordingly.
+  3. Add a labels sidecar for the scene model (e.g. `scene_classifier.labels.txt`) with one label per line.
+  4. Update the `config.rs` file with the correct model filenames or adjust `TaggingConfig` accordingly.
 
 The `build.rs` script is configured to automatically copy the `bin/` and `models/` directories into your final application bundle, ensuring they are available at runtime.
 
@@ -89,9 +90,9 @@ These steps keep the workflow auditable while respecting permission constraints.
 
 ## How to Add New Tags
 
-The auto-tagging system is based on mapping ML model outputs to a fixed set of tags. To add a new tag (e.g., `animal`):
+The auto-tagging system uses the scene model's labels as tags. To add or rename tags (e.g., `animal`):
 
-1. **Update Model Mappings**: In `tagging.rs`, modify the function that maps scene classification labels to your application's tags. You might need a more advanced classification model if the existing one doesn't recognize the concept.
+1. **Update Labels**: Edit the scene labels sidecar (e.g. `scene_classifier.labels.txt`) so it includes the desired label names.
 
 2. **Adjust Heuristics**: If the tag relies on object detection (like `portrait`), adjust the heuristics in `tagging.rs` to interpret detection results (center bias, dominant face size, focal-length boosts, etc.).
 
