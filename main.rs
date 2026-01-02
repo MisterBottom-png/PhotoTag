@@ -17,6 +17,8 @@ use crate::error::Error;
 use crate::models::{PhotoWithTags, QueryFilters, SmartViewCounts};
 use crate::scan::scan_folder;
 use crate::tagging::TaggingEngine;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 type InvokeResult<T> = std::result::Result<T, String>;
@@ -25,6 +27,26 @@ pub struct AppState {
     db: DbPool,
     paths: AppPaths,
     tagging: TaggingConfig,
+}
+
+fn resolve_model_path(
+    paths: &AppPaths,
+    models_dir_override: Option<&Path>,
+    default_name: &Path,
+    env_key: &str,
+) -> PathBuf {
+    if let Some(override_path) = env::var_os(env_key) {
+        return PathBuf::from(override_path);
+    }
+    if let Some(models_dir) = models_dir_override {
+        if default_name.is_absolute() {
+            default_name.to_path_buf()
+        } else {
+            models_dir.join(default_name)
+        }
+    } else {
+        paths.resolve_model(default_name)
+    }
 }
 
 #[tauri::command]
@@ -175,10 +197,26 @@ fn main() {
 
     let context = tauri::generate_context!();
     let paths = AppPaths::discover(context.config()).expect("Failed to discover app paths");
+    let models_dir_override = env::var_os("PHOTO_TAGGER_MODELS_DIR").map(PathBuf::from);
     let mut tagging = TaggingConfig::default();
-    tagging.scene_model_path = paths.resolve_model(&tagging.scene_model_path);
-    tagging.detection_model_path = paths.resolve_model(&tagging.detection_model_path);
-    tagging.face_model_path = paths.resolve_model(&tagging.face_model_path);
+    tagging.scene_model_path = resolve_model_path(
+        &paths,
+        models_dir_override.as_deref(),
+        &tagging.scene_model_path,
+        "PHOTO_TAGGER_SCENE_MODEL",
+    );
+    tagging.detection_model_path = resolve_model_path(
+        &paths,
+        models_dir_override.as_deref(),
+        &tagging.detection_model_path,
+        "PHOTO_TAGGER_DETECTION_MODEL",
+    );
+    tagging.face_model_path = resolve_model_path(
+        &paths,
+        models_dir_override.as_deref(),
+        &tagging.face_model_path,
+        "PHOTO_TAGGER_FACE_MODEL",
+    );
     let db_pool = db::init_database(&paths).expect("Failed to initialize database");
 
     tauri::Builder::default()

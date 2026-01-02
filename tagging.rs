@@ -406,12 +406,43 @@ impl TaggingEngine {
                 .join(", ");
             log::info!("Detection outputs: {shapes}");
         }
-        if detection_outputs_pair(&outputs) && self.detection_labels.len() != 2 {
-            log::warn!(
-                "Detection labels count ({}) does not match 2-class detector; update person_detector.labels.txt",
-                self.detection_labels.len()
-            );
-            return Ok(HashMap::new());
+        if detection_outputs_pair(&outputs) {
+            let scores = detection_scores_from_pair(&outputs).unwrap_or_default();
+            let score = scores
+                .get(&DETECTION_PAIR_FOREGROUND_INDEX)
+                .copied()
+                .unwrap_or(0.0);
+            if score <= 0.0 {
+                return Ok(HashMap::new());
+            }
+            if self.detection_labels.len() != 2 {
+                log::warn!(
+                    "Detection outputs look like a 2-class detector; overriding labels and tagging as person."
+                );
+            }
+            let label = if self.detection_labels.len() == 2 {
+                self.detection_labels
+                    .get(DETECTION_PAIR_FOREGROUND_INDEX)
+                    .map(|s| s.as_str())
+                    .unwrap_or("person")
+            } else {
+                "person"
+            };
+            let mut tags = HashMap::new();
+            if !self.detection_label_map.is_empty() {
+                apply_detection_label(&mut tags, &self.detection_label_map, label, score);
+            } else if let Some(tag) = default_detection_tag(label) {
+                let entry = tags.entry(tag.to_string()).or_insert(0.0);
+                if score > *entry {
+                    *entry = score;
+                }
+            } else {
+                let entry = tags.entry(label.to_string()).or_insert(0.0);
+                if score > *entry {
+                    *entry = score;
+                }
+            }
+            return Ok(tags);
         }
         let class_scores = detection_class_scores(&outputs);
         if class_scores.is_empty() {
