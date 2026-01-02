@@ -117,15 +117,16 @@ function TagList({ tags, onRemove }) {
 }
 
 function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize }) {
+  const sizingStyle = thumbSize ? { "--thumb-size": `${thumbSize}px` } : {};
   return (
     <div
       className={`thumb ${selected ? "selected" : ""}`}
       onClick={onSelect}
       onDoubleClick={onDoubleClick}
-      style={{ minHeight: thumbSize * 0.75 + 36 }}
+      style={sizingStyle}
     >
       {photo.thumb_path ? (
-        <img src={resolvePath(photo.thumb_path)} alt={photo.file_name} style={{ height: thumbSize * 0.75 }} />
+        <img src={resolvePath(photo.thumb_path)} alt={photo.file_name} />
       ) : (
         <div className="thumb-placeholder">No preview</div>
       )}
@@ -678,21 +679,35 @@ export default function App() {
                     {cursorIndex + 1} / {photos.length}
                   </div>
                   <div className="preview-frame">
-                    <button className="nav-arrow prev" onClick={() => moveCursor(-1)} aria-label="Previous photo">
-                      <ArrowIcon direction="left" />
-                    </button>
-                    {activePhoto?.photo.preview_path ? (
-                      <img
-                        src={resolvePath(activePhoto.photo.preview_path)}
-                        alt={activePhoto.photo.file_name}
-                        className="preview-large"
-                      />
-                    ) : (
-                      <div className="thumb-placeholder large">No preview</div>
-                    )}
-                    <button className="nav-arrow next" onClick={() => moveCursor(1)} aria-label="Next photo">
-                      <ArrowIcon direction="right" />
-                    </button>
+                    <div className="preview-gutter left">
+                      <button className="nav-arrow prev" onClick={() => moveCursor(-1)} aria-label="Previous photo">
+                        <ArrowIcon direction="left" />
+                      </button>
+                    </div>
+                    <div className="preview-media">
+                      {activePhoto?.photo.preview_path ? (
+                        <>
+                          <img
+                            src={resolvePath(activePhoto.photo.preview_path)}
+                            alt=""
+                            className="preview-blur"
+                            aria-hidden="true"
+                          />
+                          <img
+                            src={resolvePath(activePhoto.photo.preview_path)}
+                            alt={activePhoto.photo.file_name}
+                            className="preview-large"
+                          />
+                        </>
+                      ) : (
+                        <div className="thumb-placeholder large">No preview</div>
+                      )}
+                    </div>
+                    <div className="preview-gutter right">
+                      <button className="nav-arrow next" onClick={() => moveCursor(1)} aria-label="Next photo">
+                        <ArrowIcon direction="right" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -759,25 +774,28 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <div className="action-block">
-                <div className="rating-stack">
-                  <RatingStars
-                    value={activePhoto.photo.rating || 0}
-                    onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
-                  />
-                  <div className="rating-actions">
-                    <button className={activePhoto.photo.picked ? "active" : ""} onClick={togglePick}>
-                      Pick
-                    </button>
-                    <button className={activePhoto.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
-                      Reject
-                    </button>
-                    <button className="clear-rating" onClick={() => applyCullChange({ rating: null, label: "Rating cleared" })}>
-                      Clear rating
-                    </button>
+              {mode === "BROWSE" && (
+                <div className="action-block">
+                  <div className="rating-stack">
+                    <RatingStars
+                      value={activePhoto.photo.rating || 0}
+                      onChange={(v) => applyCullChange({ rating: v, label: `Rated ${v ?? "clear"}` })}
+                      showClear
+                    />
+                    <div className="rating-actions">
+                      <button className={activePhoto.photo.picked ? "active" : ""} onClick={togglePick}>
+                        Pick
+                      </button>
+                      <button className={activePhoto.photo.rejected ? "active reject" : ""} onClick={toggleReject}>
+                        Reject
+                      </button>
+                      <button className="clear-rating" onClick={() => applyCullChange({ rating: null, label: "Rating cleared" })}>
+                        Clear rating
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
               <div className="meta">
                 <div className="meta-grid">
                   <span>

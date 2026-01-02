@@ -24,9 +24,9 @@
   --shadow-soft: 0 10px 24px rgba(8, 12, 22, 0.25);
   --radius: 16px;
   --thumb-size: 200px;
-  --filmstrip-height: clamp(110px, 14vh, 160px);
   --filmstrip-thumb-size: 120px;
-  --preview-arrow-gutter: 56px;
+  --filmstrip-height: calc(var(--filmstrip-thumb-size) + 76px);
+  --preview-arrow-gutter: clamp(48px, 8vw, 72px);
 }
 
 * {
@@ -122,6 +122,10 @@ header h1 {
   border-radius: 12px;
   padding: 8px 10px;
   width: min(320px, 40vw);
+}
+
+.search input::placeholder {
+  font-size: clamp(12px, 2.8vw, 14px);
 }
 
 button {
@@ -400,6 +404,7 @@ select {
   gap: 6px;
   overflow: visible;
   position: relative;
+  min-height: calc(var(--thumb-size) + 50px);
 }
 
 .thumb:hover {
@@ -415,7 +420,8 @@ select {
 
 .thumb img {
   width: 100%;
-  height: calc(var(--thumb-size) * 0.75);
+  height: var(--thumb-size);
+  aspect-ratio: 1 / 1;
   object-fit: cover;
   border-radius: 12px;
 }
@@ -464,7 +470,7 @@ select {
 
 .thumb-placeholder {
   width: 100%;
-  height: calc(var(--thumb-size) * 0.75);
+  height: var(--thumb-size);
   display: grid;
   place-items: center;
   color: #6b7a94;
@@ -584,31 +590,63 @@ select {
 }
 
 .preview-frame {
-  position: relative;
   width: 100%;
   height: 100%;
   max-width: 100%;
   display: grid;
-  place-items: center;
+  grid-template-columns: var(--preview-arrow-gutter) minmax(0, 1fr) var(--preview-arrow-gutter);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.preview-media {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  background: #0c1528;
+}
+
+.preview-blur {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(28px);
+  transform: scale(1.08);
+  opacity: 0.35;
 }
 
 .preview-large {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   max-height: 100%;
   object-fit: contain;
-  background: #0c1528;
-  border-radius: 12px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  background: transparent;
+}
+
+.preview-gutter {
+  display: grid;
+  place-items: center;
+  height: 100%;
+}
+
+.preview-gutter.left {
+  justify-items: start;
+}
+
+.preview-gutter.right {
+  justify-items: end;
 }
 
 .nav-arrow {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 38px;
-  height: 38px;
-  z-index: 5;
+  width: clamp(32px, 4vw, 40px);
+  height: clamp(32px, 4vw, 40px);
   display: grid;
   place-items: center;
   padding: 0;
@@ -619,14 +657,6 @@ select {
   cursor: pointer;
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(6px);
-}
-
-.nav-arrow.prev {
-  left: clamp(8px, 2vw, 16px);
-}
-
-.nav-arrow.next {
-  right: clamp(8px, 2vw, 16px);
 }
 
 .nav-arrow:hover {
@@ -659,8 +689,8 @@ select {
   display: flex;
   gap: 10px;
   overflow-x: auto;
-  overflow-y: hidden;
-  padding: 8px 42px;
+  overflow-y: visible;
+  padding: 12px 42px;
   background: rgba(12, 18, 36, 0.9);
   border: 1px solid var(--stroke);
   border-radius: 14px;
@@ -1017,7 +1047,7 @@ select {
   :root {
     --preview-arrow-gutter: 40px;
     --thumb-size: 160px;
-    --filmstrip-height: clamp(90px, 18vh, 130px);
+    --filmstrip-height: calc(var(--filmstrip-thumb-size) + 64px);
   }
   .content {
     grid-template-columns: minmax(0, 1fr);
@@ -1033,26 +1063,16 @@ select {
   .preview-actions {
     justify-content: flex-start;
   }
-  .preview-stage {
-    min-height: clamp(260px, 46vh, 520px);
-  }
-  .panel {
-    max-height: 38vh;
-    overflow-y: auto;
-  }
-  .nav-arrow {
-    width: 32px;
-    height: 32px;
-  }
-  .nav-arrow.prev {
-    left: 8px;
-  }
-  .nav-arrow.next {
-    right: 8px;
-  }
-  .filmstrip {
-    padding: 6px 32px;
-  }
+    .preview-stage {
+      min-height: clamp(260px, 46vh, 520px);
+    }
+    .panel {
+      max-height: 38vh;
+      overflow-y: auto;
+    }
+    .filmstrip {
+      padding: 6px 32px;
+    }
   .strip-arrow {
     width: 24px;
     height: 24px;
@@ -1071,7 +1091,7 @@ select {
   :root {
     --preview-arrow-gutter: 32px;
     --thumb-size: 130px;
-    --filmstrip-height: clamp(80px, 20vh, 110px);
+    --filmstrip-height: calc(var(--filmstrip-thumb-size) + 60px);
   }
   .content {
     padding: 12px;
