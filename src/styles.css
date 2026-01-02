@@ -723,6 +723,10 @@ select {
   overflow: hidden;
 }
 
+.thumb.filmstrip:hover {
+  transform: none;
+}
+
 .thumb.filmstrip img {
   width: 100%;
   height: 100%;
