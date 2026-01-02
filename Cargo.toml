@@ -41,12 +41,8 @@ walkdir = "2.5.0"
 chrono = { version = "0.4", features = ["serde"] }
 image = { version = "0.24", features = ["png", "jpeg"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-onnxruntime = { version = "0.0.14" }
-onnxruntime-sys = { version = "0.0.14" }
 uuid = { version = "1.7", features = ["v4", "serde"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["directml", "load-dynamic"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-
-[patch.crates-io]
-onnxruntime = { path = "vendor/onnxruntime" }
