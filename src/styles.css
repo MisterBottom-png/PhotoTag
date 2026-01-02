@@ -749,9 +749,8 @@ select {
 }
 
 .thumb.filmstrip.selected {
-  outline: 2px solid rgba(56, 189, 248, 0.85);
-  outline-offset: 3px;
-  box-shadow: none;
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(56, 189, 248, 0.9);
 }
 
 .strip-arrow {
