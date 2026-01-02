@@ -113,13 +113,37 @@ fn process_file(
     let preview_output = paths.previews_dir.join(format!("{}_preview.jpg", hash));
 
     let has_preview = exiftool::extract_preview(paths, path, &preview_output).unwrap_or(false);
-    let final_preview = if has_preview {
-        preview_output.clone()
+    let preview_path = if has_preview && preview_output.exists() {
+        Some(preview_output)
     } else {
-        thumbnails::build_preview(path, &paths.previews_dir).unwrap_or(preview_output.clone())
+        if thumbnails::is_supported_image(path) {
+            match thumbnails::build_preview(path, &paths.previews_dir) {
+                Ok(path) if path.exists() => Some(path),
+                Ok(path) => {
+                    log::warn!("Preview output missing for {}", path.display());
+                    None
+                }
+                Err(err) => {
+                    log::warn!("Preview generation failed for {}: {}", path.display(), err);
+                    None
+                }
+            }
+        } else {
+            log::warn!(
+                "No embedded preview found for {}; skipping preview generation",
+                path.display()
+            );
+            None
+        }
     };
-    let thumb_path = thumbnails::build_thumbnail(&final_preview, &paths.thumbs_dir)
-        .unwrap_or(paths.thumbs_dir.join(format!("{}_thumb.jpg", hash)));
+    let thumb_path = preview_path.as_ref().and_then(|preview| {
+        thumbnails::build_thumbnail(preview, &paths.thumbs_dir)
+            .map_err(|err| {
+                log::warn!("Thumbnail generation failed for {}: {}", preview.display(), err);
+                err
+            })
+            .ok()
+    });
 
     let mut photo = PhotoRecord {
         id: None,
@@ -142,8 +166,8 @@ fn process_file(
         exposure_comp: exif.exposure_comp,
         gps_lat: exif.gps_lat,
         gps_lng: exif.gps_lng,
-        thumb_path: Some(thumb_path.to_string_lossy().to_string()),
-        preview_path: Some(final_preview.to_string_lossy().to_string()),
+        thumb_path: thumb_path.map(|p| p.to_string_lossy().to_string()),
+        preview_path: preview_path.map(|p| p.to_string_lossy().to_string()),
         rating: None,
         picked: false,
         rejected: false,
@@ -156,16 +180,21 @@ fn process_file(
     let photo_id = db::upsert_photo(&conn, &photo)?;
     photo.id = Some(photo_id);
 
-    let tagging = match catch_unwind(AssertUnwindSafe(|| engine.classify(&preview_output, &exif))) {
-        Ok(res) => res.unwrap_or_default(),
-        Err(_) => {
-            log::warn!(
-                "ONNX runtime panicked while tagging {}; disabling ONNX for this run",
-                path.display()
-            );
-            engine.disable_onnx();
-            TaggingResult::default()
+    let tagging = match preview_path.as_ref() {
+        Some(preview_path) => {
+            match catch_unwind(AssertUnwindSafe(|| engine.classify(preview_path, &exif))) {
+                Ok(res) => res.unwrap_or_default(),
+                Err(_) => {
+                    log::warn!(
+                        "ONNX runtime panicked while tagging {}; disabling ONNX for this run",
+                        path.display()
+                    );
+                    engine.disable_onnx();
+                    TaggingResult::default()
+                }
+            }
         }
+        None => TaggingResult::default(),
     };
     db::replace_auto_tags(&conn, photo_id, tagging, &exif)?;
 

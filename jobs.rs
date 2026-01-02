@@ -590,17 +590,40 @@ fn run_thumbnail_stage(
         let preview_output = paths.previews_dir.join(format!("{hash_hint}_preview.jpg"));
         let has_preview =
             exiftool::extract_preview(&paths, &work.path, &preview_output).unwrap_or(false);
-        let final_preview = if has_preview {
-            preview_output.clone()
+        let preview_path = if has_preview && preview_output.exists() {
+            Some(preview_output)
         } else {
-            thumbnails::build_preview(&work.path, &paths.previews_dir)
-                .unwrap_or(preview_output.clone())
+            if thumbnails::is_supported_image(&work.path) {
+                match thumbnails::build_preview(&work.path, &paths.previews_dir) {
+                    Ok(path) if path.exists() => Some(path),
+                    Ok(path) => {
+                        log::warn!("Preview output missing for {}", path.display());
+                        None
+                    }
+                    Err(err) => {
+                        log::warn!("Preview generation failed for {}: {}", work.path.display(), err);
+                        None
+                    }
+                }
+            } else {
+                log::warn!(
+                    "No embedded preview found for {}; skipping preview generation",
+                    work.path.display()
+                );
+                None
+            }
         };
-        let thumb_path = thumbnails::build_thumbnail(&final_preview, &paths.thumbs_dir)
-            .unwrap_or(paths.thumbs_dir.join(format!("{hash_hint}_thumb.jpg")));
+        let thumb_path = preview_path.as_ref().and_then(|preview| {
+            thumbnails::build_thumbnail(preview, &paths.thumbs_dir)
+                .map_err(|err| {
+                    log::warn!("Thumbnail generation failed for {}: {}", preview.display(), err);
+                    err
+                })
+                .ok()
+        });
 
-        work.preview_path = Some(final_preview);
-        work.thumb_path = Some(thumb_path);
+        work.preview_path = preview_path;
+        work.thumb_path = thumb_path;
 
         tracker.stage_complete(1);
         if tx.send(work).is_err() {

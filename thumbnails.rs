@@ -2,6 +2,15 @@ use crate::error::Result;
 use image::imageops::FilterType;
 use std::path::{Path, PathBuf};
 
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tiff", "tif", "bmp", "gif", "webp"];
+
+pub fn is_supported_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 fn resize_image(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     let img = image::open(input)?;
     let resized = img.resize(max_dim, max_dim, FilterType::CatmullRom);
