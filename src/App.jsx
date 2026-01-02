@@ -33,10 +33,10 @@ function resolvePath(path) {
 
 function formatExposureTime(value) {
   if (!value) return "n/a";
-  if (value >= 1) return `${value.toFixed(1)}s`;
+  if (value >= 1) return `${value.toFixed(1)}`;
   const denom = Math.round(1 / value);
-  if (!denom || !Number.isFinite(denom)) return `${value.toFixed(4)}s`;
-  return `1/${denom}s`;
+  if (!denom || !Number.isFinite(denom)) return `${value.toFixed(4)}`;
+  return `1/${denom}`;
 }
 
 function formatFNumber(value) {
@@ -135,10 +135,8 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, varian
   const isFilmstrip = variant === "filmstrip";
   const shutter = formatExposureTime(photo.exposure_time);
   const fNumber = formatFNumber(photo.fnumber);
-  const focal = formatFocalLength(photo.focal_length);
-  const focalLabel = focal === "n/a" ? "n/a" : `${focal}mm`;
   const iso = photo.iso ?? "n/a";
-  const hoverMeta = `${shutter} | f/${fNumber} | ${focalLabel} | ISO ${iso}`;
+  const hoverMeta = `${shutter} | ${fNumber} | ${iso}`;
   return (
     <div
       className={`thumb ${isFilmstrip ? "filmstrip" : ""} ${selected ? "selected" : ""}`}
@@ -152,14 +150,10 @@ function ThumbCard({ photo, selected, onSelect, onDoubleClick, thumbSize, varian
         <div className="thumb-placeholder">No preview</div>
       )}
       {isFilmstrip ? (
-        <>
-          <div className="thumb-hoverbar" title={hoverMeta}>
-            {hoverMeta}
-          </div>
-          <div className="thumb-overlay" title={photo.file_name}>
-            {photo.file_name}
-          </div>
-        </>
+        <div className="thumb-overlay" title={`${photo.file_name} | ${hoverMeta}`}>
+          <span className="thumb-title">{photo.file_name}</span>
+          <span className="thumb-meta">{hoverMeta}</span>
+        </div>
       ) : (
         <div className="thumb-caption">
           <div className="filename" title={photo.file_name}>
