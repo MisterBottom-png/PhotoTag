@@ -446,7 +446,7 @@ impl TaggingEngine {
         }
         let class_scores = detection_class_scores(&outputs);
         if class_scores.is_empty() {
-            log::warn!(
+            log::info!(
                 "Detection model returned no class scores for {}",
                 preview_path.display()
             );
@@ -784,7 +784,7 @@ const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const SCENE_GROUP_TOPK: usize = 10;
 const SCENE_GROUP_MIN_LABELS: usize = 3;
 const SCENE_UNRELATED_PENALTY: f32 = 0.5;
-const DETECTION_MIN_SCORE: f32 = 0.30;
+const DETECTION_MIN_SCORE: f32 = 0.38;
 const DETECTION_PAIR_FOREGROUND_INDEX: usize = 1;
 const DETECTION_TAG_BOOST: f32 = 0.20;
 const DETECTION_REQUIRED_TAGS: &[&str] = &[
