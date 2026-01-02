@@ -352,6 +352,28 @@ fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
                     best = Some(best.map_or(score, |b: f32| b.max(score)));
                 }
             }
+        } else if shape.len() >= 2 && shape[shape.len() - 1] >= 5 {
+            // YOLO-style output: [..., 5 + classes] => [x, y, w, h, obj, ...class_probs]
+            if let Some(slice) = output.as_slice() {
+                let stride = shape[shape.len() - 1] as usize;
+                for row in slice.chunks_exact(stride) {
+                    let obj = row[4];
+                    if !obj.is_finite() {
+                        continue;
+                    }
+                    let class_max = if row.len() > 5 {
+                        row[5..]
+                            .iter()
+                            .cloned()
+                            .filter(|v| v.is_finite())
+                            .fold(0.0, f32::max)
+                    } else {
+                        1.0
+                    };
+                    let score = (obj * class_max).max(0.0).min(1.0);
+                    best = Some(best.map_or(score, |b: f32| b.max(score)));
+                }
+            }
         }
     }
     best
