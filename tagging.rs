@@ -174,6 +174,12 @@ impl TaggingEngine {
         let mut tags: HashMap<String, f32> = HashMap::new();
         let detection_set: HashSet<String> = detection_probs.keys().cloned().collect();
         for (tag, score) in scene_probs {
+            if !detection_set.is_empty()
+                && DETECTION_REQUIRED_TAGS.contains(&tag.as_str())
+                && !detection_set.contains(&tag)
+            {
+                continue;
+            }
             let mut adjusted = score;
             if !detection_set.is_empty() && !detection_set.contains(&tag) {
                 adjusted *= SCENE_UNRELATED_PENALTY;
@@ -399,6 +405,13 @@ impl TaggingEngine {
                 .collect::<Vec<_>>()
                 .join(", ");
             log::info!("Detection outputs: {shapes}");
+        }
+        if detection_outputs_pair(&outputs) && self.detection_labels.len() != 2 {
+            log::warn!(
+                "Detection labels count ({}) does not match 2-class detector; update person_detector.labels.txt",
+                self.detection_labels.len()
+            );
+            return Ok(HashMap::new());
         }
         let class_scores = detection_class_scores(&outputs);
         if class_scores.is_empty() {
@@ -743,6 +756,24 @@ const SCENE_UNRELATED_PENALTY: f32 = 0.6;
 const DETECTION_MIN_SCORE: f32 = 0.25;
 const DETECTION_PAIR_FOREGROUND_INDEX: usize = 1;
 const DETECTION_TAG_BOOST: f32 = 0.30;
+const DETECTION_REQUIRED_TAGS: &[&str] = &[
+    "amphibian",
+    "bird",
+    "cat",
+    "clothing",
+    "dog",
+    "electronic",
+    "fish",
+    "food",
+    "furniture",
+    "insect_invertebrate",
+    "instrument",
+    "mammal_other",
+    "reptile",
+    "sport",
+    "tool",
+    "vehicle",
+];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ScenePreprocess {
@@ -967,6 +998,23 @@ fn detection_scores_from_pair(
         }
     }
     Some(scores)
+}
+
+fn detection_outputs_pair(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> bool {
+    if outputs.len() != 2 {
+        return false;
+    }
+    let mut has_scores = false;
+    let mut has_boxes = false;
+    for output in outputs {
+        let shape = output.shape();
+        if shape.len() == 3 && shape[2] == 2 {
+            has_scores = true;
+        } else if shape.len() == 3 && shape[2] == 4 {
+            has_boxes = true;
+        }
+    }
+    has_scores && has_boxes
 }
 
 fn sigmoid(x: f32) -> f32 {
