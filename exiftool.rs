@@ -144,8 +144,9 @@ pub fn extract_preview(paths: &AppPaths, file_path: &Path, out_path: &Path) -> R
         if out_path.exists() {
             let _ = std::fs::remove_file(out_path);
         }
+        let tag_arg = format!("-{tag}");
         let output = Command::new(&exe)
-            .args(["-b", tag, "-o"])
+            .args(["-b", &tag_arg, "-o"])
             .arg(out_path)
             .arg(file_path)
             .output()
