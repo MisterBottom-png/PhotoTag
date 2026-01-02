@@ -349,7 +349,7 @@ fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
                     if !score.is_finite() {
                         continue;
                     }
-                    best = Some(best.map_or(score, |b| b.max(score)));
+                    best = Some(best.map_or(score, |b: f32| b.max(score)));
                 }
             }
         }
