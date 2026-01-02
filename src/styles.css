@@ -750,34 +750,25 @@ select {
 
 .thumb.filmstrip .thumb-hoverbar {
   position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%) translateY(6px);
+  left: 0;
+  right: 0;
+  top: 0;
+  transform: translateY(-6px);
   padding: 6px 10px;
   font-size: 11px;
   color: #f8fafc;
   background: rgba(108, 116, 132, 0.92);
-  border: 1px solid rgba(150, 160, 178, 0.6);
-  border-radius: 8px;
+  border-bottom: 1px solid rgba(150, 160, 178, 0.6);
+  border-radius: 12px 12px 8px 8px;
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease, transform 0.2s ease;
-  max-width: calc(var(--thumb-size) * 2);
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   box-shadow: 0 10px 18px rgba(5, 10, 20, 0.35);
-}
-
-.thumb.filmstrip .thumb-hoverbar::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 6px 6px 0;
-  border-style: solid;
-  border-color: rgba(108, 116, 132, 0.92) transparent transparent;
+  z-index: 3;
 }
 
 .thumb.filmstrip:hover .thumb-overlay {
@@ -786,7 +777,7 @@ select {
 
 .thumb.filmstrip:hover .thumb-hoverbar {
   opacity: 1;
-  transform: translateX(-50%) translateY(0);
+  transform: translateY(0);
 }
 
 .thumb.filmstrip.selected {
