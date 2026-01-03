@@ -8,6 +8,7 @@ mod embedding;
 mod exiftool;
 mod jobs;
 mod models;
+mod onnx;
 mod schema;
 mod tagging;
 mod thumbnails;
@@ -16,7 +17,10 @@ use crate::config::{AppPaths, InferenceDevicePreference, TaggingConfig};
 use crate::db::DbPool;
 use crate::error::Error;
 use crate::jobs::JobManager;
-use crate::models::{InferenceStatus, PhotoWithTags, QueryFilters, SmartViewCounts};
+use crate::models::{
+    InferenceBackendInfo, InferenceStatus, PhotoWithTags, QueryFilters, SmartViewCounts,
+};
+use tauri::Manager;
 use crate::tagging::TaggingEngine;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -142,6 +146,12 @@ async fn rerun_auto(state: tauri::State<'_, AppState>, photo_id: i64) -> InvokeR
 fn get_inference_status(state: tauri::State<AppState>) -> InvokeResult<InferenceStatus> {
     let config = state.tagging.lock().unwrap().clone();
     Ok(tagging::inference_status(&config))
+}
+
+#[tauri::command]
+fn get_inference_backend_info(state: tauri::State<AppState>) -> InvokeResult<InferenceBackendInfo> {
+    let config = state.tagging.lock().unwrap().clone();
+    Ok(tagging::inference_backend_info(&config))
 }
 
 #[tauri::command]
@@ -390,7 +400,12 @@ fn main() {
             tagging: Arc::new(Mutex::new(tagging)),
             jobs: JobManager::default(),
         })
-        .setup(|_app| Ok(()))
+        .setup(|app| {
+            if let Err(err) = onnx::init_ort_dylib_path(&app.app_handle()) {
+                log::warn!("Failed to initialize ORT DLL path: {err}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             import_folder,
@@ -412,6 +427,7 @@ fn main() {
             find_duplicates,
             find_similar,
             get_inference_status,
+            get_inference_backend_info,
             set_inference_device,
             test_inference
         ])

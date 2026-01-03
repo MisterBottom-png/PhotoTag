@@ -42,6 +42,8 @@ pub struct TaggingConfig {
     pub detection_iou_threshold: f32,
     #[serde(default)]
     pub inference_device: InferenceDevicePreference,
+    #[serde(default = "default_inference_device_id")]
+    pub inference_device_id: Option<u32>,
 }
 
 impl Default for TaggingConfig {
@@ -57,6 +59,7 @@ impl Default for TaggingConfig {
             detection_confidence_threshold: 0.25,
             detection_iou_threshold: 0.45,
             inference_device: InferenceDevicePreference::Auto,
+            inference_device_id: Some(0),
         }
     }
 }
@@ -67,6 +70,10 @@ fn default_detection_confidence_threshold() -> f32 {
 
 fn default_detection_iou_threshold() -> f32 {
     0.45
+}
+
+fn default_inference_device_id() -> Option<u32> {
+    Some(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +154,19 @@ impl AppPaths {
         if name.is_absolute() {
             name.to_path_buf()
         } else {
-            self.models_dir.join(name)
+            let primary = self.models_dir.join(name);
+            if primary.exists() {
+                return primary;
+            }
+            let dev_fallback = Path::new(env!("CARGO_MANIFEST_DIR")).join("models").join(name);
+            if dev_fallback.exists() {
+                return dev_fallback;
+            }
+            let cwd_fallback = Path::new("models").join(name);
+            if cwd_fallback.exists() {
+                return cwd_fallback;
+            }
+            primary
         }
     }
 

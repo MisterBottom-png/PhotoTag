@@ -187,3 +187,9 @@ pub struct InferenceStatus {
     pub runtime_version: Option<String>,
     pub models: Vec<InferenceModelStatus>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceBackendInfo {
+    pub provider: String,
+    pub device_id: Option<u32>,
+}

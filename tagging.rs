@@ -1,64 +1,34 @@
 use crate::config::{InferenceDevicePreference, TaggingConfig};
 use crate::error::{Error, Result};
 use crate::models::{ExifMetadata, InferenceModelStatus, InferenceStatus, TaggingResult};
+use crate::onnx::{self, InferenceProvider, OrtRuntimeConfig, ProviderChoice};
 use image::imageops::FilterType;
 use lazy_static::lazy_static;
-use onnxruntime::{
-    environment::Environment,
-    ndarray::{Array, IxDyn},
-    session::Session,
-    tensor::OrtOwnedTensor,
-    GraphOptimizationLevel, LoggingLevel,
-};
+use ndarray::Array;
+use ort::session::Session;
+use ort::value::TensorRef;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::ffi::CStr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 lazy_static! {
-    static ref ORT_ENV: Option<&'static Environment> = Environment::builder()
-        .with_name("photo-tagging")
-        .with_log_level(LoggingLevel::Warning)
-        .build()
-        .ok()
-        .map(|env| Box::leak(Box::new(env)))
-        .map(|env_ref| env_ref as &'static Environment);
     static ref SESSION_CACHE: Mutex<HashMap<SessionCacheKey, Arc<SessionHandle>>> =
         Mutex::new(HashMap::new());
     static ref INFERENCE_WARNING: Mutex<Option<String>> = Mutex::new(None);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InferenceProvider {
-    Cpu,
-    DirectML,
-}
-
-impl InferenceProvider {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Cpu => "CPU",
-            Self::DirectML => "GPU (DirectML)",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SessionCacheKey {
     model_path: String,
-    preference: InferenceDevicePreference,
+    provider: ProviderChoice,
+    device_id: Option<u32>,
 }
 
-struct UnsafeSession(Session<'static>);
-
-unsafe impl Send for UnsafeSession {}
-unsafe impl Sync for UnsafeSession {}
-
 struct SessionHandle {
-    session: Mutex<UnsafeSession>,
+    session: Mutex<Session>,
     provider: InferenceProvider,
     label: &'static str,
     model_path: &'static Path,
@@ -90,18 +60,7 @@ impl TimingStats {
 }
 
 fn ort_runtime_version() -> Option<String> {
-    unsafe {
-        let api_base = onnxruntime_sys::OrtGetApiBase();
-        if api_base.is_null() {
-            return None;
-        }
-        let get_version = (*api_base).GetVersionString?;
-        let raw = get_version();
-        if raw.is_null() {
-            return None;
-        }
-        CStr::from_ptr(raw).to_str().ok().map(|s| s.to_string())
-    }
+    onnx::ort_runtime_version()
 }
 
 fn log_runtime_diagnostics_once() {
@@ -194,17 +153,14 @@ impl TaggingEngine {
             }
         }
 
-        let preference = config.inference_device;
-        let scene_session = ORT_ENV.as_ref().copied().and_then(|env| {
-            get_or_create_session(env, scene_path.as_path(), "scene", preference, 224, 224)
-        });
+        let ort_cfg = ort_config_from_tagging(&config);
+        let scene_session =
+            get_or_create_session(scene_path.as_path(), "scene", ort_cfg, 224, 224);
 
-        let detection_session = ORT_ENV.as_ref().copied().and_then(|env| {
-            get_or_create_session(env, detect_path.as_path(), "detection", preference, 640, 640)
-        });
-        let face_session = ORT_ENV.as_ref().copied().and_then(|env| {
-            get_or_create_session(env, face_path.as_path(), "face", preference, 224, 224)
-        });
+        let detection_session =
+            get_or_create_session(detect_path.as_path(), "detection", ort_cfg, 640, 640);
+        let face_session =
+            get_or_create_session(face_path.as_path(), "face", ort_cfg, 224, 224);
         if scene_session.is_some() {
             log::info!("Loaded scene model: {}", scene_path.display());
         } else {
@@ -345,8 +301,8 @@ impl TaggingEngine {
         let session_handle = self.scene_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session.0, 224, 224);
-            (w, h, model_expects_nchw(&session.0))
+            let (w, h) = model_input_hw(&session, 224, 224);
+            (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -543,8 +499,8 @@ impl TaggingEngine {
         let session_handle = self.detection_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session.0, 640, 640);
-            (w, h, model_expects_nchw(&session.0))
+            let (w, h) = model_input_hw(&session, 640, 640);
+            (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -569,21 +525,23 @@ impl TaggingEngine {
         let decode_preprocess = decode_start.elapsed();
         let infer_start = Instant::now();
         let mut session = session_handle.session.lock().unwrap();
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .0
-            .run(vec![input_tensor])
+        let outputs = session
+            .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
+                |e| Error::Init(format!("Invalid detection tensor: {e}"))
+            )?])
             .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?;
         let inference_time = infer_start.elapsed();
-        if !outputs.is_empty() {
-            let shapes = outputs
+        let output_tensors = collect_output_tensors(&outputs);
+        if !output_tensors.is_empty() {
+            let shapes = output_tensors
                 .iter()
-                .map(|o| format!("{:?}", o.shape()))
+                .map(|o| format!("{:?}", o.shape))
                 .collect::<Vec<_>>()
                 .join(", ");
             log::info!("Detection outputs: {shapes}");
         }
-        if detection_outputs_pair(&outputs) {
-            let scores = detection_scores_from_pair(&outputs).unwrap_or_default();
+        if detection_outputs_pair(&output_tensors) {
+            let scores = detection_scores_from_pair(&output_tensors).unwrap_or_default();
             let score = scores
                 .get(&DETECTION_PAIR_FOREGROUND_INDEX)
                 .copied()
@@ -630,7 +588,7 @@ impl TaggingEngine {
             return Ok(tags);
         }
         if let Some(detections) = yolov5_detections_from_outputs(
-            &outputs,
+            &output_tensors,
             ratio,
             dw,
             dh,
@@ -688,7 +646,7 @@ impl TaggingEngine {
             }
             return Ok(tags);
         }
-        let class_scores = detection_class_scores(&outputs);
+        let class_scores = detection_class_scores(&output_tensors);
         if class_scores.is_empty() {
             log::info!(
                 "Detection model returned no class scores for {}",
@@ -743,8 +701,8 @@ impl TaggingEngine {
         let session_handle = self.face_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session.0, 224, 224);
-            (w, h, model_expects_nchw(&session.0))
+            let (w, h) = model_input_hw(&session, 224, 224);
+            (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
         let img = image::open(preview_path)?;
@@ -765,18 +723,20 @@ impl TaggingEngine {
         let decode_preprocess = decode_start.elapsed();
         let infer_start = Instant::now();
         let mut session = session_handle.session.lock().unwrap();
-        let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-            .0
-            .run(vec![input_tensor])
+        let outputs = session
+            .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
+                |e| Error::Init(format!("Invalid face tensor: {e}"))
+            )?])
             .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?;
         let inference_time = infer_start.elapsed();
-        if outputs.is_empty() {
+        if outputs.len() == 0 {
             log::warn!(
                 "Face model returned no outputs for {}",
                 preview_path.display()
             );
         }
-        let max_score = max_face_score(&outputs).unwrap_or(0.0).max(0.0).min(1.0);
+        let output_tensors = collect_output_tensors(&outputs);
+        let max_score = max_face_score(&output_tensors).unwrap_or(0.0).max(0.0).min(1.0);
         log::info!(
             "Face score for {}: {:.4} (threshold {:.4})",
             preview_path.display(),
@@ -837,12 +797,22 @@ impl TaggingEngine {
     }
 }
 
-fn model_expects_nchw(session: &Session<'_>) -> bool {
-    let dims: Vec<Option<u32>> = session
+fn input_dims(session: &Session) -> Vec<Option<u32>> {
+    let shape = session
         .inputs
         .get(0)
-        .map(|i| i.dimensions.clone())
-        .unwrap_or_default();
+        .and_then(|i| i.input_type.tensor_shape());
+    let Some(shape) = shape else {
+        return Vec::new();
+    };
+    shape
+        .iter()
+        .map(|d| if *d > 0 { Some(*d as u32) } else { None })
+        .collect()
+}
+
+fn model_expects_nchw(session: &Session) -> bool {
+    let dims = input_dims(session);
     if dims.len() == 4 {
         match (dims[1], dims[2], dims[3]) {
             (Some(3), Some(_), Some(_)) => return true,
@@ -853,12 +823,8 @@ fn model_expects_nchw(session: &Session<'_>) -> bool {
     true
 }
 
-fn model_input_hw(session: &Session<'_>, default_w: u32, default_h: u32) -> (u32, u32) {
-    let dims: Vec<Option<u32>> = session
-        .inputs
-        .get(0)
-        .map(|i| i.dimensions.clone())
-        .unwrap_or_default();
+fn model_input_hw(session: &Session, default_w: u32, default_h: u32) -> (u32, u32) {
+    let dims = input_dims(session);
     if dims.len() == 4 {
         if let (Some(h), Some(w)) = (dims[2], dims[3]) {
             return (w, h);
@@ -1178,8 +1144,34 @@ struct Detection {
     bbox: [f32; 4],
 }
 
+struct OutputTensor {
+    shape: Vec<i64>,
+    data: Vec<f32>,
+}
+
+fn collect_output_tensors(outputs: &ort::session::SessionOutputs<'_>) -> Vec<OutputTensor> {
+    let mut tensors = Vec::new();
+    for (_, value) in outputs.iter() {
+        if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+            tensors.push(OutputTensor {
+                shape: shape.iter().copied().collect(),
+                data: data.to_vec(),
+            });
+        }
+    }
+    tensors
+}
+
+fn dim_to_usize(dim: i64) -> Option<usize> {
+    if dim > 0 {
+        Some(dim as usize)
+    } else {
+        None
+    }
+}
+
 fn yolov5_detections_from_outputs(
-    outputs: &[OrtOwnedTensor<f32, IxDyn>],
+    outputs: &[OutputTensor],
     ratio: f32,
     dw: f32,
     dh: f32,
@@ -1310,12 +1302,12 @@ enum YoloRows<'a> {
 }
 
 impl<'a> YoloRows<'a> {
-    fn from_output(output: &'a OrtOwnedTensor<f32, IxDyn>) -> Option<Self> {
-        let shape = output.shape();
-        let data = output.as_slice()?;
+    fn from_output(output: &'a OutputTensor) -> Option<Self> {
+        let shape = &output.shape;
+        let data = output.data.as_slice();
         if shape.len() == 3 {
-            let dim1 = shape[1] as usize;
-            let dim2 = shape[2] as usize;
+            let dim1 = dim_to_usize(shape[1])?;
+            let dim2 = dim_to_usize(shape[2])?;
             if dim1 >= 6 && dim2 > dim1 && data.len() >= dim1 * dim2 {
                 return Some(Self::ChannelMajor {
                     data,
@@ -1325,11 +1317,13 @@ impl<'a> YoloRows<'a> {
             }
         }
         if shape.len() >= 2 {
-            let stride = *shape.last()? as usize;
+            let stride = dim_to_usize(*shape.last()?)?;
             if stride >= 6 {
                 let rows = shape[..shape.len() - 1]
                     .iter()
-                    .fold(1usize, |acc, d| acc.saturating_mul(*d as usize));
+                    .fold(1usize, |acc, d| {
+                        acc.saturating_mul(dim_to_usize(*d).unwrap_or(0))
+                    });
                 if data.len() >= rows * stride {
                     return Some(Self::RowMajor { data, rows, stride });
                 }
@@ -1360,7 +1354,7 @@ impl<'a> YoloRows<'a> {
     }
 }
 
-fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usize, f32> {
+fn detection_class_scores(outputs: &[OutputTensor]) -> HashMap<usize, f32> {
     let mut scores: HashMap<usize, f32> = HashMap::new();
     if outputs.len() == 2 {
         if let Some(paired) = detection_scores_from_pair(outputs) {
@@ -1368,12 +1362,13 @@ fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usi
         }
     }
     for output in outputs {
-        let shape = output.shape();
-        let Some(slice) = output.as_slice() else {
-            continue;
-        };
+        let shape = &output.shape;
+        let slice = output.data.as_slice();
         if shape.len() >= 4 && shape[shape.len() - 1] >= 5 {
-            let stride = shape[shape.len() - 1] as usize;
+            let stride = match dim_to_usize(shape[shape.len() - 1]) {
+                Some(stride) if stride > 0 => stride,
+                _ => continue,
+            };
             for row in slice.chunks_exact(stride) {
                 let obj = sigmoid(row[4]);
                 if !obj.is_finite() {
@@ -1394,8 +1389,8 @@ fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usi
                 }
             }
         } else if shape.len() == 3 {
-            let dim1 = shape[1] as usize;
-            let dim2 = shape[2] as usize;
+            let dim1 = dim_to_usize(shape[1]).unwrap_or(0);
+            let dim2 = dim_to_usize(shape[2]).unwrap_or(0);
             if dim1 >= 5 && dim2 > dim1 {
                 for col in 0..dim2 {
                     let base = col * dim1;
@@ -1441,7 +1436,7 @@ fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usi
                 }
             }
         } else if shape.len() == 2 {
-            let classes = shape[shape.len() - 1] as usize;
+            let classes = dim_to_usize(shape[shape.len() - 1]).unwrap_or(0);
             if classes == 0 {
                 continue;
             }
@@ -1461,13 +1456,11 @@ fn detection_class_scores(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> HashMap<usi
     scores
 }
 
-fn detection_scores_from_pair(
-    outputs: &[OrtOwnedTensor<f32, IxDyn>],
-) -> Option<HashMap<usize, f32>> {
-    let mut scores_out: Option<&OrtOwnedTensor<f32, IxDyn>> = None;
-    let mut boxes_out: Option<&OrtOwnedTensor<f32, IxDyn>> = None;
+fn detection_scores_from_pair(outputs: &[OutputTensor]) -> Option<HashMap<usize, f32>> {
+    let mut scores_out: Option<&OutputTensor> = None;
+    let mut boxes_out: Option<&OutputTensor> = None;
     for output in outputs {
-        let shape = output.shape();
+        let shape = &output.shape;
         if shape.len() == 3 && shape[2] == 2 {
             scores_out = Some(output);
         } else if shape.len() == 3 && shape[2] == 4 {
@@ -1476,11 +1469,9 @@ fn detection_scores_from_pair(
     }
     let scores_out = scores_out?;
     let _boxes_out = boxes_out?;
-    let shape = scores_out.shape();
-    let Some(slice) = scores_out.as_slice() else {
-        return None;
-    };
-    let cols = shape[2] as usize;
+    let shape = &scores_out.shape;
+    let slice = scores_out.data.as_slice();
+    let cols = dim_to_usize(shape[2]).unwrap_or(0);
     if cols != 2 {
         return None;
     }
@@ -1502,14 +1493,14 @@ fn detection_scores_from_pair(
     Some(scores)
 }
 
-fn detection_outputs_pair(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> bool {
+fn detection_outputs_pair(outputs: &[OutputTensor]) -> bool {
     if outputs.len() != 2 {
         return false;
     }
     let mut has_scores = false;
     let mut has_boxes = false;
     for output in outputs {
-        let shape = output.shape();
+        let shape = &output.shape;
         if shape.len() == 3 && shape[2] == 2 {
             has_scores = true;
         } else if shape.len() == 3 && shape[2] == 4 {
@@ -1529,41 +1520,40 @@ fn sigmoid(x: f32) -> f32 {
     }
 }
 
-fn max_face_score(outputs: &[OrtOwnedTensor<f32, IxDyn>]) -> Option<f32> {
+fn max_face_score(outputs: &[OutputTensor]) -> Option<f32> {
     let mut best = None;
     for output in outputs {
-        let shape = output.shape();
+        let shape = &output.shape;
         if shape.len() >= 2 && shape[shape.len() - 1] == 2 {
-            if let Some(slice) = output.as_slice() {
-                for pair in slice.chunks_exact(2) {
-                    let score = pair[1];
-                    if !score.is_finite() {
-                        continue;
-                    }
-                    best = Some(best.map_or(score, |b: f32| b.max(score)));
+            for pair in output.data.as_slice().chunks_exact(2) {
+                let score = pair[1];
+                if !score.is_finite() {
+                    continue;
                 }
+                best = Some(best.map_or(score, |b: f32| b.max(score)));
             }
         } else if shape.len() >= 2 && shape[shape.len() - 1] >= 5 {
             // YOLO-style output: [..., 5 + classes] => [x, y, w, h, obj, ...class_probs]
-            if let Some(slice) = output.as_slice() {
-                let stride = shape[shape.len() - 1] as usize;
-                for row in slice.chunks_exact(stride) {
-                    let obj = row[4];
-                    if !obj.is_finite() {
-                        continue;
-                    }
-                    let class_max = if row.len() > 5 {
-                        row[5..]
-                            .iter()
-                            .cloned()
-                            .filter(|v| v.is_finite())
-                            .fold(0.0, f32::max)
-                    } else {
-                        1.0
-                    };
-                    let score = (obj * class_max).max(0.0).min(1.0);
-                    best = Some(best.map_or(score, |b: f32| b.max(score)));
+            let stride = match dim_to_usize(shape[shape.len() - 1]) {
+                Some(stride) if stride > 0 => stride,
+                _ => continue,
+            };
+            for row in output.data.as_slice().chunks_exact(stride) {
+                let obj = row[4];
+                if !obj.is_finite() {
+                    continue;
                 }
+                let class_max = if row.len() > 5 {
+                    row[5..]
+                        .iter()
+                        .cloned()
+                        .filter(|v| v.is_finite())
+                        .fold(0.0, f32::max)
+                } else {
+                    1.0
+                };
+                let score = (obj * class_max).max(0.0).min(1.0);
+                best = Some(best.map_or(score, |b: f32| b.max(score)));
             }
         }
     }
@@ -1826,24 +1816,20 @@ fn run_scene_logits(
     let preprocess_time = prep_start.elapsed();
     let infer_start = Instant::now();
     let mut session = session_handle.session.lock().unwrap();
-    let outputs: Vec<OrtOwnedTensor<f32, _>> = session
-        .0
-        .run(vec![input_tensor])
+    let outputs = session
+        .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
+            |e| Error::Init(format!("Invalid scene tensor: {e}"))
+        )?])
         .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
     let inference_time = infer_start.elapsed();
-    if outputs.is_empty() {
+    if outputs.len() == 0 {
         log::warn!("Scene model returned no outputs");
         return Ok((Vec::new(), preprocess_time, inference_time));
     }
-    Ok((
-        outputs
-            .get(0)
-            .and_then(|t| t.as_slice())
-            .unwrap_or(&[])
-            .to_vec(),
-        preprocess_time,
-        inference_time,
-    ))
+    let (_, data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| Error::Init(format!("Failed to extract scene outputs: {e}")))?;
+    Ok((data.to_vec(), preprocess_time, inference_time))
 }
 
 fn top1_prob(logits: &[f32]) -> f32 {
@@ -1861,28 +1847,37 @@ fn top1_prob(logits: &[f32]) -> f32 {
     1.0 / sum
 }
 
-fn session_cache_key(
-    model_path: &Path,
-    preference: InferenceDevicePreference,
-) -> SessionCacheKey {
+fn ort_config_from_tagging(config: &TaggingConfig) -> OrtRuntimeConfig {
+    let provider = match config.inference_device {
+        InferenceDevicePreference::Auto => ProviderChoice::Auto,
+        InferenceDevicePreference::Gpu => ProviderChoice::DirectMLOnly,
+        InferenceDevicePreference::Cpu => ProviderChoice::CpuOnly,
+    };
+    OrtRuntimeConfig {
+        provider,
+        device_id: config.inference_device_id,
+    }
+}
+
+fn session_cache_key(model_path: &Path, cfg: OrtRuntimeConfig) -> SessionCacheKey {
     SessionCacheKey {
         model_path: model_path.to_string_lossy().to_string(),
-        preference,
+        provider: cfg.provider,
+        device_id: cfg.device_id,
     }
 }
 
 fn get_or_create_session(
-    env: &'static Environment,
     model_path: &Path,
     label: &'static str,
-    preference: InferenceDevicePreference,
+    cfg: OrtRuntimeConfig,
     default_w: u32,
     default_h: u32,
 ) -> Option<Arc<SessionHandle>> {
     if !model_path.exists() {
         return None;
     }
-    let key = session_cache_key(model_path, preference);
+    let key = session_cache_key(model_path, cfg);
     {
         let cache = SESSION_CACHE.lock().unwrap();
         if let Some(handle) = cache.get(&key) {
@@ -1890,14 +1885,7 @@ fn get_or_create_session(
         }
     }
 
-    let created = match create_session_with_preference(
-        env,
-        model_path,
-        label,
-        preference,
-        default_w,
-        default_h,
-    ) {
+    let created = match create_session_with_preference(model_path, label, cfg, default_w, default_h) {
         Ok(handle) => Arc::new(handle),
         Err(err) => {
             log::warn!("Failed to create {label} session: {err}");
@@ -1911,10 +1899,9 @@ fn get_or_create_session(
 }
 
 fn create_session_with_preference(
-    env: &'static Environment,
     model_path: &Path,
     label: &'static str,
-    preference: InferenceDevicePreference,
+    cfg: OrtRuntimeConfig,
     default_w: u32,
     default_h: u32,
 ) -> std::result::Result<SessionHandle, String> {
@@ -1925,49 +1912,18 @@ fn create_session_with_preference(
 
     let model_path_static: &'static Path =
         Box::leak(model_path.to_path_buf().into_boxed_path());
-    let try_build = |use_dml: bool| -> std::result::Result<Session<'static>, String> {
-        let build = || -> std::result::Result<Session<'static>, String> {
-            let mut builder = env
-                .new_session_builder()
-                .map_err(|e| format!("{e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Basic)
-                .map_err(|e| format!("{e}"))?;
-            if use_dml {
-                builder = builder
-                    .with_disable_mem_pattern()
-                    .map_err(|e| format!("{e}"))?
-                    .with_execution_mode_sequential()
-                    .map_err(|e| format!("{e}"))?
-                    .with_directml(0)
-                    .map_err(|e| format!("{e}"))?;
-            }
-            builder
-                .with_model_from_file(model_path_static)
-                .map_err(|e| format!("{e}"))
-        };
-        match catch_unwind(AssertUnwindSafe(build)) {
-            Ok(res) => res,
-            Err(_) => Err("ONNX runtime panic while building session".into()),
-        }
-    };
-
     let mut warning: Option<String> = None;
-    let (provider, mut session) = match preference {
-        InferenceDevicePreference::Cpu => (InferenceProvider::Cpu, try_build(false)?),
-        InferenceDevicePreference::Gpu | InferenceDevicePreference::Auto => match try_build(true) {
-            Ok(session) => (InferenceProvider::DirectML, session),
-            Err(err) => {
-                let msg = format!("DirectML provider unavailable for {label}: {err}");
-                if preference == InferenceDevicePreference::Gpu {
-                    warning = Some(msg.clone());
-                    log::warn!("{msg}");
-                } else {
-                    log::info!("{msg}; falling back to CPU");
-                }
-                (InferenceProvider::Cpu, try_build(false)?)
-            }
-        },
+    let (mut session, provider) = match onnx::build_session(model_path_static, cfg) {
+        Ok((session, provider)) => (session, provider),
+        Err(err) => return Err(format!("{err}")),
     };
+    if matches!(cfg.provider, ProviderChoice::DirectMLOnly)
+        && matches!(provider, InferenceProvider::Cpu)
+    {
+        let msg = format!("DirectML provider unavailable for {label}; using CPU");
+        warning = Some(msg.clone());
+        log::warn!("{msg}");
+    }
 
     if let Some(message) = warning {
         *INFERENCE_WARNING.lock().unwrap() = Some(message);
@@ -1981,14 +1937,14 @@ fn create_session_with_preference(
     );
 
     Ok(SessionHandle {
-        session: Mutex::new(UnsafeSession(session)),
+        session: Mutex::new(session),
         provider,
         label,
         model_path: model_path_static,
     })
 }
 
-fn warmup_session(session: &mut Session<'_>, label: &str, default_w: u32, default_h: u32) {
+fn warmup_session(session: &mut Session, label: &str, default_w: u32, default_h: u32) {
     let (w, h) = model_input_hw(session, default_w, default_h);
     let nchw = model_expects_nchw(session);
     let (shape, len) = if nchw {
@@ -2005,7 +1961,14 @@ fn warmup_session(session: &mut Session<'_>, label: &str, default_w: u32, defaul
             return;
         }
     };
-    if let Err(err) = session.run::<f32, f32, _>(vec![input_tensor]) {
+    let input_value = match TensorRef::from_array_view(&input_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            log::warn!("Warmup tensor build failed for {label}: {err}");
+            return;
+        }
+    };
+    if let Err(err) = session.run(ort::inputs![input_value]) {
         log::warn!("Warmup run failed for {label}: {err}");
     }
 }
@@ -2027,6 +1990,7 @@ pub fn clear_session_cache() {
 
 pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
     let preference = config.inference_device;
+    let ort_cfg = ort_config_from_tagging(config);
     let mut models = Vec::new();
     let mut provider_label = "Unavailable".to_string();
     let mut had_provider = false;
@@ -2039,9 +2003,7 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
         if !model_path.exists() {
             return None;
         }
-        let env = ORT_ENV.as_ref().copied()?;
-        let handle =
-            get_or_create_session(env, model_path, label, preference, default_w, default_h)?;
+        let handle = get_or_create_session(model_path, label, ort_cfg, default_w, default_h)?;
         Some(handle.provider.label().to_string())
     };
 
@@ -2088,6 +2050,38 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
         warning,
         runtime_version,
         models,
+    }
+}
+
+pub fn inference_backend_info(config: &TaggingConfig) -> crate::models::InferenceBackendInfo {
+    let ort_cfg = ort_config_from_tagging(config);
+    let mut provider = InferenceProvider::Cpu;
+    let try_model = |label: &'static str,
+                     model_path: &Path,
+                     default_w: u32,
+                     default_h: u32|
+     -> Option<InferenceProvider> {
+        if !model_path.exists() {
+            return None;
+        }
+        let handle = get_or_create_session(model_path, label, ort_cfg, default_w, default_h)?;
+        Some(handle.provider)
+    };
+
+    if let Some(p) = try_model("scene", &config.scene_model_path, 224, 224) {
+        provider = p;
+    } else if let Some(p) = try_model("detection", &config.detection_model_path, 640, 640) {
+        provider = p;
+    } else if let Some(p) = try_model("face", &config.face_model_path, 224, 224) {
+        provider = p;
+    }
+
+    crate::models::InferenceBackendInfo {
+        provider: match provider {
+            InferenceProvider::Cpu => "cpu".to_string(),
+            InferenceProvider::DirectML { .. } => "directml".to_string(),
+        },
+        device_id: provider.device_id(),
     }
 }
 
