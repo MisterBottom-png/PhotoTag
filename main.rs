@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod embedding;
 mod exiftool;
+mod gpu;
 mod jobs;
 mod models;
 mod onnx;

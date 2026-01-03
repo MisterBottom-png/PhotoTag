@@ -11,10 +11,33 @@ pub fn is_supported_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn resize_dims(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (max_dim.max(1), max_dim.max(1));
+    }
+    let scale_w = max_dim as f32 / width as f32;
+    let scale_h = max_dim as f32 / height as f32;
+    let scale = scale_w.min(scale_h);
+    let new_w = (width as f32 * scale).round().max(1.0) as u32;
+    let new_h = (height as f32 * scale).round().max(1.0) as u32;
+    (new_w, new_h)
+}
+
 fn resize_image(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     let img = image::open(input)?;
-    let resized = img.resize(max_dim, max_dim, FilterType::CatmullRom);
-    resized.save(output)?;
+    let (dst_w, dst_h) = resize_dims(img.width(), img.height(), max_dim);
+    let mut used_gpu = false;
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(gpu_resized) = crate::gpu::resize_rgba8(&img.to_rgba8(), dst_w, dst_h) {
+            gpu_resized.save(output)?;
+            used_gpu = true;
+        }
+    }
+    if !used_gpu {
+        let resized = img.resize(max_dim, max_dim, FilterType::CatmullRom);
+        resized.save(output)?;
+    }
     Ok(())
 }
 

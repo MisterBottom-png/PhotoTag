@@ -12,6 +12,7 @@ use std::env;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 lazy_static! {
@@ -19,6 +20,8 @@ lazy_static! {
         Mutex::new(HashMap::new());
     static ref INFERENCE_WARNING: Mutex<Option<String>> = Mutex::new(None);
 }
+
+static FORCE_CPU: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SessionCacheKey {
@@ -529,7 +532,11 @@ impl TaggingEngine {
             .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
                 |e| Error::Init(format!("Invalid detection tensor: {e}"))
             )?])
-            .map_err(|e| Error::Init(format!("Failed to run detection model: {e}")))?;
+            .map_err(|e| {
+                let msg = format!("{e}");
+                maybe_force_cpu_on_error(&msg);
+                Error::Init(format!("Failed to run detection model: {e}"))
+            })?;
         let inference_time = infer_start.elapsed();
         let output_tensors = collect_output_tensors(&outputs);
         if !output_tensors.is_empty() {
@@ -727,7 +734,11 @@ impl TaggingEngine {
             .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
                 |e| Error::Init(format!("Invalid face tensor: {e}"))
             )?])
-            .map_err(|e| Error::Init(format!("Failed to run face detector: {e}")))?;
+            .map_err(|e| {
+                let msg = format!("{e}");
+                maybe_force_cpu_on_error(&msg);
+                Error::Init(format!("Failed to run face detector: {e}"))
+            })?;
         let inference_time = infer_start.elapsed();
         if outputs.len() == 0 {
             log::warn!(
@@ -1820,7 +1831,11 @@ fn run_scene_logits(
         .run(ort::inputs![TensorRef::from_array_view(&input_tensor).map_err(
             |e| Error::Init(format!("Invalid scene tensor: {e}"))
         )?])
-        .map_err(|e| Error::Init(format!("Failed to run scene model: {e}")))?;
+        .map_err(|e| {
+            let msg = format!("{e}");
+            maybe_force_cpu_on_error(&msg);
+            Error::Init(format!("Failed to run scene model: {e}"))
+        })?;
     let inference_time = infer_start.elapsed();
     if outputs.len() == 0 {
         log::warn!("Scene model returned no outputs");
@@ -1877,7 +1892,15 @@ fn get_or_create_session(
     if !model_path.exists() {
         return None;
     }
-    let key = session_cache_key(model_path, cfg);
+    let effective_cfg = if FORCE_CPU.load(Ordering::Relaxed) {
+        OrtRuntimeConfig {
+            provider: ProviderChoice::CpuOnly,
+            device_id: cfg.device_id,
+        }
+    } else {
+        cfg
+    };
+    let key = session_cache_key(model_path, effective_cfg);
     {
         let cache = SESSION_CACHE.lock().unwrap();
         if let Some(handle) = cache.get(&key) {
@@ -1885,7 +1908,9 @@ fn get_or_create_session(
         }
     }
 
-    let created = match create_session_with_preference(model_path, label, cfg, default_w, default_h) {
+    let created =
+        match create_session_with_preference(model_path, label, effective_cfg, default_w, default_h)
+        {
         Ok(handle) => Arc::new(handle),
         Err(err) => {
             log::warn!("Failed to create {label} session: {err}");
@@ -1944,6 +1969,21 @@ fn create_session_with_preference(
     })
 }
 
+fn maybe_force_cpu_on_error(err: &str) {
+    let err_lc = err.to_ascii_lowercase();
+    if err_lc.contains("887a0005")
+        || err_lc.contains("device instance has been suspended")
+        || err_lc.contains("device removed")
+    {
+        if !FORCE_CPU.swap(true, Ordering::Relaxed) {
+            log::warn!("DirectML device removed; forcing CPU fallback");
+        }
+        SESSION_CACHE.lock().unwrap().clear();
+        *INFERENCE_WARNING.lock().unwrap() =
+            Some("DirectML device removed; using CPU fallback".to_string());
+    }
+}
+
 fn warmup_session(session: &mut Session, label: &str, default_w: u32, default_h: u32) {
     let (w, h) = model_input_hw(session, default_w, default_h);
     let nchw = model_expects_nchw(session);
@@ -1990,7 +2030,10 @@ pub fn clear_session_cache() {
 
 pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
     let preference = config.inference_device;
-    let ort_cfg = ort_config_from_tagging(config);
+    let mut ort_cfg = ort_config_from_tagging(config);
+    if FORCE_CPU.load(Ordering::Relaxed) {
+        ort_cfg.provider = ProviderChoice::CpuOnly;
+    }
     let mut models = Vec::new();
     let mut provider_label = "Unavailable".to_string();
     let mut had_provider = false;
@@ -2054,7 +2097,10 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
 }
 
 pub fn inference_backend_info(config: &TaggingConfig) -> crate::models::InferenceBackendInfo {
-    let ort_cfg = ort_config_from_tagging(config);
+    let mut ort_cfg = ort_config_from_tagging(config);
+    if FORCE_CPU.load(Ordering::Relaxed) {
+        ort_cfg.provider = ProviderChoice::CpuOnly;
+    }
     let mut provider = InferenceProvider::Cpu;
     let try_model = |label: &'static str,
                      model_path: &Path,
