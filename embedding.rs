@@ -6,8 +6,10 @@ pub fn compute_embedding(path: &Path) -> Result<Vec<f32>> {
     let img = image::open(path)?.to_rgb8();
     let resized = image::imageops::resize(&img, 64, 64, FilterType::Triangle);
     #[cfg(target_os = "windows")]
-    if let Ok(hist) = crate::gpu::histogram_embedding(&resized) {
+    if crate::gpu::gpu_preprocess_enabled() {
+        if let Ok(hist) = crate::gpu::histogram_embedding(&resized) {
         return Ok(hist);
+        }
     }
     let bins = 16usize;
     let mut hist = vec![0f32; bins * 3];

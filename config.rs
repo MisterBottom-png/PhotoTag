@@ -32,6 +32,12 @@ pub struct TaggingConfig {
     pub scene_model_path: PathBuf,
     pub detection_model_path: PathBuf,
     pub face_model_path: PathBuf,
+    #[serde(default = "default_scene_input_size")]
+    pub scene_input_size: u32,
+    #[serde(default = "default_detection_input_size")]
+    pub detection_input_size: u32,
+    #[serde(default = "default_enable_face_detector")]
+    pub enable_face_detector: bool,
     pub confidence_threshold: f32,
     pub suggestion_threshold: f32,
     pub portrait_min_area_ratio: f32,
@@ -52,6 +58,9 @@ impl Default for TaggingConfig {
             scene_model_path: PathBuf::from("scene_classifier.onnx"),
             detection_model_path: PathBuf::from("person_detector.onnx"),
             face_model_path: PathBuf::from("face_detector.onnx"),
+            scene_input_size: 192,
+            detection_input_size: 512,
+            enable_face_detector: false,
             confidence_threshold: 0.70,
             suggestion_threshold: 0.50,
             portrait_min_area_ratio: 0.12,
@@ -70,6 +79,18 @@ fn default_detection_confidence_threshold() -> f32 {
 
 fn default_detection_iou_threshold() -> f32 {
     0.45
+}
+
+fn default_scene_input_size() -> u32 {
+    192
+}
+
+fn default_detection_input_size() -> u32 {
+    512
+}
+
+fn default_enable_face_detector() -> bool {
+    false
 }
 
 fn default_inference_device_id() -> Option<u32> {

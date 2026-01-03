@@ -49,5 +49,6 @@ If the DirectML entry point is missing, the app logs:
 - DirectML session options use sequential execution and disable memory patterns.
 
 ## Other GPU Work
-- Embedding histogram computation can run on the GPU when available (Windows only).
-- Thumbnail/preview resizing uses the GPU when available (Windows only), with CPU fallback.
+- Embedding histogram computation can run on the GPU when enabled (Windows only).
+- Thumbnail/preview resizing uses the GPU when enabled (Windows only), with CPU fallback.
+- Set `PHOTO_TAGGER_GPU_PREPROCESS=1` to enable GPU preprocessing. Default is CPU to avoid readback stalls.

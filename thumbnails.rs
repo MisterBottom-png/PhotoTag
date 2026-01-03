@@ -29,9 +29,11 @@ fn resize_image(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     let mut used_gpu = false;
     #[cfg(target_os = "windows")]
     {
-        if let Ok(gpu_resized) = crate::gpu::resize_rgba8(&img.to_rgba8(), dst_w, dst_h) {
-            gpu_resized.save(output)?;
-            used_gpu = true;
+        if crate::gpu::gpu_preprocess_enabled() {
+            if let Ok(gpu_resized) = crate::gpu::resize_rgba8(&img.to_rgba8(), dst_w, dst_h) {
+                gpu_resized.save(output)?;
+                used_gpu = true;
+            }
         }
     }
     if !used_gpu {

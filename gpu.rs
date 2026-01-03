@@ -13,8 +13,24 @@ mod d3d_gpu {
     }
 
     static GPU_CONTEXT: OnceLock<Option<GpuContext>> = OnceLock::new();
+    static PREPROCESS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+    pub(super) fn preprocess_enabled() -> bool {
+        *PREPROCESS_ENABLED.get_or_init(|| {
+            std::env::var("PHOTO_TAGGER_GPU_PREPROCESS")
+                .ok()
+                .map(|v| {
+                    let v = v.to_ascii_lowercase();
+                    v == "1" || v == "true" || v == "yes"
+                })
+                .unwrap_or(false)
+        })
+    }
 
     fn get_context() -> Option<&'static GpuContext> {
+        if !preprocess_enabled() {
+            return None;
+        }
         GPU_CONTEXT
             .get_or_init(|| match init_gpu() {
                 Ok(ctx) => Some(ctx),
@@ -446,4 +462,15 @@ pub fn resize_rgba8(
     _dst_h: u32,
 ) -> Result<image::RgbaImage> {
     Err(Error::Init("GPU resize unsupported on this OS".into()))
+}
+
+pub fn gpu_preprocess_enabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return d3d_gpu::preprocess_enabled();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }

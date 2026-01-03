@@ -135,8 +135,10 @@ impl TaggingEngine {
         if !detect_path.exists() {
             log::warn!("Detection model not found: {}", detect_path.display());
         }
-        if !face_path.exists() {
-            log::warn!("Face model not found: {}", face_path.display());
+        if config.enable_face_detector {
+            if !face_path.exists() {
+                log::warn!("Face model not found: {}", face_path.display());
+            }
         }
 
         let scene_labels = load_labels_from_model(&scene_path);
@@ -157,13 +159,32 @@ impl TaggingEngine {
         }
 
         let ort_cfg = ort_config_from_tagging(&config);
-        let scene_session =
-            get_or_create_session(scene_path.as_path(), "scene", ort_cfg, 224, 224);
+        let scene_session = get_or_create_session(
+            scene_path.as_path(),
+            "scene",
+            ort_cfg,
+            config.scene_input_size,
+            config.scene_input_size,
+        );
 
-        let detection_session =
-            get_or_create_session(detect_path.as_path(), "detection", ort_cfg, 640, 640);
-        let face_session =
-            get_or_create_session(face_path.as_path(), "face", ort_cfg, 224, 224);
+        let detection_session = get_or_create_session(
+            detect_path.as_path(),
+            "detection",
+            ort_cfg,
+            config.detection_input_size,
+            config.detection_input_size,
+        );
+        let face_session = if config.enable_face_detector {
+            get_or_create_session(
+                face_path.as_path(),
+                "face",
+                ort_cfg,
+                config.scene_input_size,
+                config.scene_input_size,
+            )
+        } else {
+            None
+        };
         if scene_session.is_some() {
             log::info!("Loaded scene model: {}", scene_path.display());
         } else {
@@ -174,10 +195,12 @@ impl TaggingEngine {
         } else {
             log::warn!("Failed to load detection model: {}", detect_path.display());
         }
-        if face_session.is_some() {
-            log::info!("Loaded face model: {}", face_path.display());
-        } else {
-            log::warn!("Failed to load face model: {}", face_path.display());
+        if config.enable_face_detector {
+            if face_session.is_some() {
+                log::info!("Loaded face model: {}", face_path.display());
+            } else {
+                log::warn!("Failed to load face model: {}", face_path.display());
+            }
         }
 
         let onnx_enabled =
@@ -226,16 +249,20 @@ impl TaggingEngine {
                 HashMap::new()
             }
         };
-        let portrait_score = match safe_run(|| self.run_portrait(preview_path, exif)) {
-            Ok(score) => score,
-            Err(err) => {
-                log::warn!(
-                    "Face model failed for {}: {}",
-                    preview_path.display(),
-                    err
-                );
-                0.0
+        let portrait_score = if self.config.enable_face_detector {
+            match safe_run(|| self.run_portrait(preview_path, exif)) {
+                Ok(score) => score,
+                Err(err) => {
+                    log::warn!(
+                        "Face model failed for {}: {}",
+                        preview_path.display(),
+                        err
+                    );
+                    0.0
+                }
             }
+        } else {
+            0.0
         };
 
         let mut tags: HashMap<String, f32> = HashMap::new();
@@ -304,7 +331,11 @@ impl TaggingEngine {
         let session_handle = self.scene_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 224, 224);
+            let (w, h) = model_input_hw(
+                &session,
+                self.config.scene_input_size,
+                self.config.scene_input_size,
+            );
             (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
@@ -502,7 +533,11 @@ impl TaggingEngine {
         let session_handle = self.detection_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 640, 640);
+            let (w, h) = model_input_hw(
+                &session,
+                self.config.detection_input_size,
+                self.config.detection_input_size,
+            );
             (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
@@ -708,7 +743,11 @@ impl TaggingEngine {
         let session_handle = self.face_session.as_ref().unwrap().clone();
         let (w, h, nchw) = {
             let session = session_handle.session.lock().unwrap();
-            let (w, h) = model_input_hw(&session, 224, 224);
+            let (w, h) = model_input_hw(
+                &session,
+                self.config.scene_input_size,
+                self.config.scene_input_size,
+            );
             (w, h, model_expects_nchw(&session))
         };
         let decode_start = Instant::now();
@@ -2051,7 +2090,12 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
     };
 
     if let Some(provider) =
-        try_model("scene", &config.scene_model_path, 224, 224)
+        try_model(
+            "scene",
+            &config.scene_model_path,
+            config.scene_input_size,
+            config.scene_input_size,
+        )
     {
         provider_label = provider.clone();
         had_provider = true;
@@ -2061,7 +2105,12 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
         });
     }
     if let Some(provider) =
-        try_model("detection", &config.detection_model_path, 640, 640)
+        try_model(
+            "detection",
+            &config.detection_model_path,
+            config.detection_input_size,
+            config.detection_input_size,
+        )
     {
         if !had_provider {
             provider_label = provider.clone();
@@ -2072,16 +2121,21 @@ pub fn inference_status(config: &TaggingConfig) -> InferenceStatus {
             provider,
         });
     }
-    if let Some(provider) =
-        try_model("face", &config.face_model_path, 224, 224)
-    {
-        if !had_provider {
-            provider_label = provider.clone();
+    if config.enable_face_detector {
+        if let Some(provider) = try_model(
+            "face",
+            &config.face_model_path,
+            config.scene_input_size,
+            config.scene_input_size,
+        ) {
+            if !had_provider {
+                provider_label = provider.clone();
+            }
+            models.push(InferenceModelStatus {
+                label: "face".to_string(),
+                provider,
+            });
         }
-        models.push(InferenceModelStatus {
-            label: "face".to_string(),
-            provider,
-        });
     }
 
     let warning = INFERENCE_WARNING.lock().unwrap().clone();
@@ -2114,12 +2168,29 @@ pub fn inference_backend_info(config: &TaggingConfig) -> crate::models::Inferenc
         Some(handle.provider)
     };
 
-    if let Some(p) = try_model("scene", &config.scene_model_path, 224, 224) {
+    if let Some(p) = try_model(
+        "scene",
+        &config.scene_model_path,
+        config.scene_input_size,
+        config.scene_input_size,
+    ) {
         provider = p;
-    } else if let Some(p) = try_model("detection", &config.detection_model_path, 640, 640) {
+    } else if let Some(p) = try_model(
+        "detection",
+        &config.detection_model_path,
+        config.detection_input_size,
+        config.detection_input_size,
+    ) {
         provider = p;
-    } else if let Some(p) = try_model("face", &config.face_model_path, 224, 224) {
-        provider = p;
+    } else if config.enable_face_detector {
+        if let Some(p) = try_model(
+            "face",
+            &config.face_model_path,
+            config.scene_input_size,
+            config.scene_input_size,
+        ) {
+            provider = p;
+        }
     }
 
     crate::models::InferenceBackendInfo {
